@@ -157,7 +157,9 @@ for src in (existing, load(core)):
         else:
             merged[k] = v
 os.makedirs(os.path.dirname(out), exist_ok=True)
-json.dump(merged, open(out, "w"), indent=2); open(out, "a").write("\n")
+# newline="\n": a Windows Python writes CRLF in text mode, and this file lives in LF projects.
+with open(out, "w", newline="\n") as f:
+    json.dump(merged, f, indent=2); f.write("\n")
 print("  ~ .claude/settings.json (merged)")
 PY
 
@@ -171,7 +173,8 @@ if [ ! -f "$KIT_JSON" ]; then
 import json, sys
 pk = [dict(zip(("profile", "path"), line.split("\t"))) for line in sys.stdin.read().splitlines() if line]
 cfg = {"packages": pk, "design": {"pack": "", "exempt": []}, "protected_branches": ["main", "master"]}
-json.dump(cfg, open(sys.argv[1], "w"), indent=2); open(sys.argv[1], "a").write("\n")' "$KIT_JSON"
+with open(sys.argv[1], "w", newline="\n") as f:
+    json.dump(cfg, f, indent=2); f.write("\n")' "$KIT_JSON"
   echo "  + .claude/kit.json"
 fi
 if [ "$FIRST_APPLY" -eq 1 ]; then
