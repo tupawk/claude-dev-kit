@@ -4,8 +4,8 @@ For data analysis, Excel and report generation, automation, CLIs, and Claude ski
 
 | Concern | Tool |
 |---|---|
-| Runtime | Python 3.12+ (see `.python-version`) |
-| Project and deps | `uv` with `pyproject.toml`; lockfile committed |
+| Runtime | Python 3.13 (see `.python-version`) |
+| Project and deps | `uv` with `pyproject.toml` and a committed `uv.lock` for new projects. An existing project on pip and a `.venv` keeps working: the hooks use `uv run` only when both uv and `uv.lock` are present, else the package's `.venv`, else `python -m`. |
 | Tests | pytest, pytest-cov, hypothesis for property tests where useful |
 | Lint / format | Ruff (lint and format), mypy in strict mode |
 | Data | pandas or polars; openpyxl for Excel output |
@@ -37,7 +37,7 @@ extend-exclude = [".claude", "design"]
 
 ## Test scope in hooks
 
-Two hooks run tests for you. After every edit, the PostToolUse hook runs the tests related to the file you touched (a test file runs itself; `src/foo.py` runs tests whose name contains `foo`). When Claude tries to end a turn, the Stop hook refuses if tests are red.
+Two hooks run tests for you, from this package's directory (the one named for it in `.claude/kit.json`). After every edit, the PostToolUse hook runs the tests related to the file you touched (a test file runs itself; `src/foo.py` runs tests whose name contains `foo`). When Claude tries to end a turn, the Stop hook refuses if tests are red. A tool that is not installed in the package's environment is skipped, so install ruff, mypy and pytest there.
 
 By default the Stop hook uses **last-failed** scope: it reruns only what pytest recorded as failing and passes if nothing is recorded. This stays fast on a large suite. To run the **full suite on every turn** instead, add to `.claude/settings.json` (or `.claude/settings.local.json` for just yourself):
 

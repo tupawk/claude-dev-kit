@@ -10,7 +10,7 @@ For web applications with a UI, APIs, and anything user-facing. Design-system co
 | Styling | CSS variables from `design/tokens.css`; Tailwind mapped to tokens if used |
 | Tests | Vitest for unit and integration, Playwright for end-to-end, Testing Library for components |
 | Lint / format | ESLint (typescript-eslint, jsx-a11y) and Prettier |
-| Package manager | pnpm |
+| Package manager | pnpm for new projects. The hooks read the lockfile (`pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`) in the package or the project root and use that manager; binaries are found in `node_modules/.bin` from the package up to the root, so hoisted workspaces work. |
 | Coverage floor | 80% lines on `src/`, enforced in CI |
 
 ## Commands
@@ -32,9 +32,9 @@ pnpm build                   # production build
 
 ## Test scope in hooks
 
-Two hooks run tests for you. After every edit, the PostToolUse hook runs the Vitest files related to the file you touched (`vitest related`). When Claude tries to end a turn, the Stop hook refuses if tests are red.
+Two hooks run tests for you, from this package's directory (the one named for it in `.claude/kit.json`). After every edit, the PostToolUse hook formats with Prettier, lints with ESLint, runs the package's `typecheck` script (or `tsc --noEmit` on the nearest `tsconfig.json` when there is none) and runs the Vitest files related to the file you touched (`vitest related`). When Claude tries to end a turn, the Stop hook refuses if tests are red.
 
-By default the Stop hook uses **changed** scope: `vitest run --changed`, which runs only the test files related to what changed since the last commit. To run the **full suite on every turn** instead, add to `.claude/settings.json` (or `.claude/settings.local.json` for just yourself):
+By default the Stop hook uses **changed** scope: `vitest run --changed`, which runs only the test files related to what changed since the last commit. A package on another runner (node:test, Jest) has no related mode, so its `test` script runs in full whenever the package has uncommitted changes. To run the **full suite on every turn** instead, add to `.claude/settings.json` (or `.claude/settings.local.json` for just yourself):
 
 ```json
 { "env": { "KIT_TEST_SCOPE": "full" } }
