@@ -22,7 +22,7 @@ This file is the index. It stays under 200 lines. Details live in the files it p
 
 ## Engineering principles
 
-See `.claude/rules/engineering-principles.md`. Short version: small functions with one job, explicit errors, no duplication, no magic values, dependencies injected not hardcoded, boring and readable beats clever.
+See `.claude/rules/engineering-principles.md`. Short version: before writing, check whether it needs to exist, already exists here, or is covered by stdlib, the platform, or an installed dependency. Then small functions with one job, explicit errors, no duplication, no magic values, dependencies injected not hardcoded, boring and readable beats clever. Mark deliberate shortcuts with `defer: <ceiling>, <upgrade path>`. Run `/simplify-review` when a diff grows past what the plan item needed.
 
 ## Git
 

@@ -22,6 +22,10 @@ TARGET="${2:-}"
 usage() { sed -n '2,16p' "$0"; exit 1; }
 [ -z "$MODE" ] || [ -z "$TARGET" ] && usage
 
+# Escape &, /, and \ so sed treats a value literally in the replacement side of s///
+# (an unescaped & would expand to the matched text).
+sed_escape() { printf '%s' "$1" | sed 's/[&/\]/\\&/g'; }
+
 PY=""; for c in python3 python "py -3"; do case "$(command -v "${c%% *}" 2>/dev/null)" in *WindowsApps*) continue;; esac; $c -c "import sys; sys.exit(sys.version_info[0] != 3)" >/dev/null 2>&1 && { PY="$c"; break; }; done  # skip the slow, non-functional Windows Store stubs
 [ -n "$PY" ] || { echo "Error: no working Python 3 found (tried python3, python, py -3). Install Python 3 or fix the PATH." >&2; exit 1; }
 
@@ -37,13 +41,14 @@ if [ "$MODE" = "update" ]; then
   NAME="${3:-$(basename "$TARGET")}"
   PACKAGES=$(cd "$TARGET" && $PY "$KIT_DIR/core/.claude/hooks/kit.py" packages)
 else
+  case "${3:-}" in *[$'\n\r']*) echo "Project name must not contain newlines" >&2; exit 1;; esac
   [ -f "$KIT_JSON" ] && { echo "Error: $KIT_JSON already exists. Edit it and run: $0 update $TARGET" >&2; exit 1; }
   NAME="${3:-$(basename "$TARGET")}"
   PACKAGES=""
   IFS=',' read -ra SPECS <<< "$MODE"
   for s in "${SPECS[@]}"; do
     p="${s%%=*}"; d="${s#*=}"; [ "$d" = "$s" ] && d="."
-    [ -d "$KIT_DIR/profiles/$p" ] || { echo "Unknown profile: $p" >&2; usage; }
+    case "$p" in typescript|python|scripts) ;; *) echo "Unknown profile: $p" >&2; usage;; esac
     d="${d#./}"; d="${d%/}"; [ -z "$d" ] && d="."
     LINE=$(printf '%s\t%s' "$p" "$d")
     PACKAGES="${PACKAGES}${PACKAGES:+
@@ -217,8 +222,9 @@ fi
 # ---- 6. Fill in name and profiles on first creation ----------------------------------------------
 if [ "$UPDATE" -eq 0 ]; then
   PROFILE_LIST=$(echo $PROFILES | tr ' ' ',')
-  sed -i.bak "s/<project name>/$NAME/; s/<typescript | python | scripts>/$PROFILE_LIST/" "$TARGET/CLAUDE.md" && rm -f "$TARGET/CLAUDE.md.bak"
-  sed -i.bak "s/<Project name>/$NAME/" "$TARGET/README.md" && rm -f "$TARGET/README.md.bak"
+  ESCAPED_NAME=$(sed_escape "$NAME")
+  sed -i.bak "s/<project name>/$ESCAPED_NAME/; s/<typescript | python | scripts>/$PROFILE_LIST/" "$TARGET/CLAUDE.md" && rm -f "$TARGET/CLAUDE.md.bak"
+  sed -i.bak "s/<Project name>/$ESCAPED_NAME/" "$TARGET/README.md" && rm -f "$TARGET/README.md.bak"
   [ "$ONLY_SCRIPTS" -eq 1 ] && sed -i.bak 's/^- \*\*project_size:\*\* full/- **project_size:** small/' "$TARGET/CLAUDE.md" && rm -f "$TARGET/CLAUDE.md.bak"
   [ -d "$TARGET/.git" ] || (cd "$TARGET" && git init -q -b main && echo "  + git init (main)")
 fi

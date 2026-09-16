@@ -16,7 +16,7 @@ if [ -z "$KIT_PY" ]; then
 fi
 RESULT=$(printf '%s' "$INPUT" | $KIT_PY -c '
 import sys, json, os, re
-sys.path.insert(0, os.path.join(".claude", "hooks"))
+sys.path.insert(0, os.environ.get("KIT_LIB_DIR") or os.path.join(".claude", "hooks"))
 import kit
 d = json.load(sys.stdin)
 ti = d.get("tool_input", {})

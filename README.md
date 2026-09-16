@@ -9,7 +9,7 @@ core/                        stack-agnostic, every project gets all of this
   CLAUDE.md                  index of how we work (plan first, TDD, ask when stuck, DoD)
   .claude/agents/            six Opus subagents: architect, implementer, test-writer,
                              security-reviewer, code-reviewer, docs-writer
-  .claude/skills/            /plan-project, /tdd, /definition-of-done, /update-docs
+  .claude/skills/            /plan-project, /tdd, /definition-of-done, /update-docs, /simplify-review
   .claude/rules/             engineering principles, when-stuck, git, docs, secrets,
                              design-system (always on), frontend (path-scoped)
   .claude/hooks/             guards: destructive git, secrets in writes, hex colours in frontend files
@@ -26,6 +26,8 @@ profiles/
   scripts/                   small utilities and glue, lighter gates
   <profile>/ci-job.yml       the CI job the script stitches into a new project's workflow
 scripts/new-project.sh       assembles core + profiles into a project, or updates one
+scripts/measure-rule.sh      A/B a standards change on a real task with headless Claude Code
+.claude-plugin/              plugin manifest: agents, skills, hooks installable with /plugin
 ```
 
 ## Create a new project
@@ -109,6 +111,7 @@ Several projects for one organisation point at the same pack, so a palette chang
 | Plan reviewed before code | `/plan-project` skill + `architect` agent + `Status: APPROVED` gate in PLAN.md | core |
 | Opus for design, review, security | `model: opus` in each agent's frontmatter | core/.claude/agents |
 | Engineering principles | rules loaded every session | core/.claude/rules |
+| Minimal code, no over-building | before-you-write ladder in the principles rule, `/simplify-review` delete list, code-reviewer step 5, `defer:` markers checked by `/definition-of-done` | core |
 | Ask when stuck, no workarounds | when-stuck rule; agents return `STATUS: BLOCKED` | core |
 | TDD | `/tdd` skill + PostToolUse hook that runs the tests related to each edit + Stop hook that refuses to finish with red tests (last-failed or changed scope by default, `KIT_TEST_SCOPE=full` for the whole suite; see the profile's STACK.md) | core dispatchers + profile hooks |
 | Consistent, accessible UI | tokens.css + design pack + path-scoped frontend rule + PreToolUse hook that blocks hex colours outside tokens.css (with `design.exempt`) + image aspect checker | core |
@@ -125,6 +128,8 @@ Hooks are deterministic and cannot be talked around. Rules and CLAUDE.md are ins
 3. Tag a release (`git tag v0.2.0 && git push --tags`). Projects record the tag in `.claude/KIT_VERSION`.
 4. Run `new-project.sh update` on each project to pull the change.
 
+Before shipping a rule that is meant to change what Claude writes, measure it: `scripts/measure-rule.sh <project> <task.txt> --overlay <dir-with-the-new-rule> --runs 2` clones the project per run, runs `claude -p` with only project settings loaded, and reports added lines, cost, and turns for the current kit versus the candidate. Runs cost money; start with one run on haiku.
+
 Rule of thumb from Anthropic's guidance: if you find yourself writing "always do X" in CLAUDE.md, it should be a hook. If it is a 30-line procedure, it should be a skill. If it only applies to some files, it should be a path-scoped rule. If it differs per project, it belongs in `.claude/kit.json`, not in a local edit to a kit-owned file (the next `update` would erase it).
 
 ## Requirements
@@ -135,6 +140,10 @@ Rule of thumb from Anthropic's guidance: if you find yourself writing "always do
 
 ## Open items
 
-- Plugin packaging: the `core/.claude/` contents can be bundled as a Claude Code plugin for one-command install.
+- Plugin: `.claude-plugin/` packages the agents, skills, and hooks so a project can `/plugin marketplace add tupawk/claude-dev-kit` then `/plugin install claude-dev-kit@claude-dev-kit`. Plugins cannot carry `.claude/rules/`, permission deny lists, `design/`, `kit.json`, or the stack profiles, so `new-project.sh` remains the full install and the plugin is the light option for repos that only want the agents and guards. Not yet installed in a real project.
 - Managed settings: the git and secrets hooks can be deployed through Claude Code managed settings so individual projects cannot disable them.
 - CI fragments assume uv and pnpm; a project on pip or npm edits the generated workflow once (it is project-owned after creation).
+
+## Related work
+
+[Ponytail](https://github.com/dietrichgebert/ponytail) (MIT) is where the before-you-write ladder, the delete-list review tags, the deferral comment convention, and the headless A/B measurement idea come from. Its default mode conflicts with the kit's TDD, documentation, and I/O-interface rules, so the ideas were adapted rather than the plugin installed. Its `lite` mode is compatible with every kit gate if you want it in a `project_size: small` repo.

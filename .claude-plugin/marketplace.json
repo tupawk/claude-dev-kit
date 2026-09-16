@@ -1,0 +1,14 @@
+{
+  "name": "claude-dev-kit",
+  "description": "Claude Code standards: Opus subagents, plan/TDD/DoD/simplify skills, and git, secrets, and design-token safety hooks.",
+  "owner": {
+    "name": "tupawk"
+  },
+  "plugins": [
+    {
+      "name": "claude-dev-kit",
+      "source": "./",
+      "description": "Development standards: agents, skills, and safety hooks from claude-dev-kit."
+    }
+  ]
+}
