@@ -129,7 +129,7 @@ Rule of thumb from Anthropic's guidance: if you find yourself writing "always do
 
 ## Requirements
 
-- Git Bash or another POSIX shell (the hooks are bash scripts; on Windows, Git Bash is enough).
+- Git Bash or another POSIX shell (the hooks are bash scripts; on Windows, Git Bash is enough). Line endings are handled: the kit checks out LF regardless of `core.autocrlf`, and the script writes LF into projects.
 - A working Python 3 on PATH (`python3`, `python`, or the `py -3` launcher). The hooks use it to parse tool input and fail closed if none is found.
 - Per package, whatever its profile expects: for python, `uv` with a `uv.lock`, or a `.venv` with ruff, mypy and pytest installed, or those on the PATH Python; for typescript, the package's `node_modules` (hoisted workspaces are found).
 

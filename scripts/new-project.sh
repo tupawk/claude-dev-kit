@@ -53,11 +53,18 @@ fi
 PROFILES=$(printf '%s\n' "$PACKAGES" | cut -f1 | awk '!seen[$0]++')
 ONLY_SCRIPTS=1; for p in $PROFILES; do [ "$p" = "scripts" ] || ONLY_SCRIPTS=0; done
 
+# Text files are written LF whatever the kit or pack checkout has: a CRLF copy into a project that
+# normalises to LF shows every kit file as modified until git renormalises it, and a CRLF hook breaks bash.
+is_text() { case "$1" in *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.pdf|*.pyc) return 1;; *) return 0;; esac; }
+copy_file() { # src dst
+  mkdir -p "$(dirname "$2")"
+  if is_text "$1"; then tr -d '\r' < "$1" > "$2"; else cp "$1" "$2"; fi
+}
 copy_if_missing() { # src dst
-  if [ ! -e "$2" ]; then mkdir -p "$(dirname "$2")"; cp "$1" "$2"; echo "  + ${2#"$TARGET"/}"; fi
+  if [ ! -e "$2" ]; then copy_file "$1" "$2"; echo "  + ${2#"$TARGET"/}"; fi
 }
 copy_always() {
-  mkdir -p "$(dirname "$2")"; cp "$1" "$2"; echo "  ~ ${2#"$TARGET"/}"
+  copy_file "$1" "$2"; echo "  ~ ${2#"$TARGET"/}"
 }
 
 echo "Assembling $NAME in $TARGET"
