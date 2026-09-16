@@ -2,11 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+- "Before you write" ladder in `engineering-principles.md`: does it need to exist, does it already exist here, stdlib, native platform, installed dependency, then the minimum. Explicitly never removes boundary validation, data-loss handling, security, accessibility, tests, or requested behaviour. Bug fixes now start by grepping every caller and fixing the shared code once.
+- `defer: <ceiling>, <upgrade path>` comment convention for deliberate shortcuts. `/definition-of-done` check 11 lists every marker in the diff and fails on a marker missing either half; code-reviewer checks the same.
+- `/simplify-review` skill: over-engineering-only review of the diff, a path, or the repo, with `delete:`, `stdlib:`, `native:`, `yagni:`, `shrink:` tags and a net line count. Applies nothing.
+- code-reviewer step 5 produces the same delete list, reported in a new "Delete list" section.
+- `.claude-plugin/` (plugin.json, hooks.json, marketplace.json) so the agents, skills, and hooks can be installed with `/plugin`. Rules, permissions, design tokens, kit.json, and profiles are not plugin-shippable and still come from `new-project.sh`. `lib.sh` now finds `kit.py` next to itself instead of under the project's `.claude/hooks`, so the guard hooks work from a plugin root too.
+- `scripts/measure-rule.sh`: clones a project per run, runs `claude -p` headless with `--setting-sources project` so no user-level plugins leak in, and compares added lines, cost, turns, and time between the current kit and a candidate overlay (or bare Claude Code when no overlay is given).
+
 ### Fixed
 - **Line endings.** `.gitattributes` (the kit's and the one given to projects) now sets `* text=auto eol=lf`,
   so a checkout is LF whatever `core.autocrlf` says, and `new-project.sh` strips CR from every text file
   it copies, from the kit and from a design pack. A CRLF checkout used to make every copied `.md`,
   `.json` and `.py` show as modified in an LF project until `git add` renormalised it.
+- `new-project.sh` corrupted project names containing `&` (`sed` expands an unescaped `&` to the matched text) and passed the profile through unchecked. The name is escaped for `&`, `/`, and `\`, names with a newline are rejected up front, and the profile is checked against the fixed list `typescript | python | scripts`.
+
+### Changed
+- `engineering-principles.md` says the I/O edge interfaces are the one place a single-implementation interface is expected, and adds "no unrequested abstractions elsewhere". Ideas adapted from Ponytail (MIT), see README "Related work".
 
 ## [0.2.0] - 2026-09-16
 

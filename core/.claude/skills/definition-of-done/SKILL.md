@@ -19,7 +19,8 @@ Run every check. Report each as PASS, FAIL, or N/A with one line of evidence. Do
 8. **Secrets.** No credentials in the diff. `.env.example` updated if new config was added.
 9. **Git.** On a feature branch, rebased on main, conventional commits, PR template filled in.
 10. **Suppressions.** Zero new `ts-ignore`, `noqa`, `eslint-disable`, `type: ignore`, or equivalents, or each one is justified in a comment.
+11. **Deliberate shortcuts.** Run `git diff main...HEAD | grep -n 'defer:'`. List every marker with its ceiling and upgrade path. A marker missing either half is a FAIL. Zero markers is a PASS.
 
 ## Output
 
-A table of the ten checks with status and evidence, then either "Ready for PR" or the list of what remains.
+A table of the eleven checks with status and evidence, then either "Ready for PR" or the list of what remains.

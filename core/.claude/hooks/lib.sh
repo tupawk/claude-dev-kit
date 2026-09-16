@@ -3,7 +3,7 @@
 #
 #   KIT_ROOT   the project root (Claude Code runs hooks there; CLAUDE_PROJECT_DIR is authoritative)
 #   KIT_PY     a working Python 3 command, skipping the Windows Store stubs on PATH
-#   kit <cmd>  the config reader in kit.py: packages, package-for, design-exempt, protected-branches,
+#   kit <cmd>  the config reader in kit.py (next to this file): packages, package-for, design-exempt, protected-branches,
 #              rel, tool-input. See that file for what each prints.
 #
 # A guardrail hook (PreToolUse) must fail closed when KIT_PY is empty: a check that cannot read its
@@ -15,4 +15,6 @@ for c in python3 python "py -3"; do
   case "$(command -v "${c%% *}" 2>/dev/null)" in *WindowsApps*) continue;; esac
   $c -c "import sys; sys.exit(sys.version_info[0] != 3)" >/dev/null 2>&1 && { KIT_PY="$c"; break; }
 done
-kit() { $KIT_PY "$KIT_ROOT/.claude/hooks/kit.py" "$@"; }
+# kit.py sits next to this file, so the hooks work both copied into a project and installed as a plugin.
+KIT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"; export KIT_LIB_DIR   # inline Python in hooks imports kit from here
+kit() { $KIT_PY "$KIT_LIB_DIR/kit.py" "$@"; }
