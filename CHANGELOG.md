@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Line endings.** `.gitattributes` (the kit's and the one given to projects) now sets `* text=auto eol=lf`,
+  so a checkout is LF whatever `core.autocrlf` says, and `new-project.sh` strips CR from every text file
+  it copies, from the kit and from a design pack. A CRLF checkout used to make every copied `.md`,
+  `.json` and `.py` show as modified in an LF project until `git add` renormalised it.
+
+## [0.2.0] - 2026-09-16
+
 Driven by applying the kit to its first polyglot repository (a TypeScript API plus a Python worker, with a
 vendored Shopify theme and an app that already had its own palette). Every item below is something the
 first apply got wrong or could not express.

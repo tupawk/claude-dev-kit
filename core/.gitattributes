@@ -1,6 +1,8 @@
-# Normalise line endings; shell scripts must stay LF or bash on Windows checkouts may break.
-* text=auto
-*.sh text eol=lf
+# Every text file is LF in the repository AND in the working tree, whatever core.autocrlf says.
+# The hooks are bash scripts that break on CRLF, and new-project.sh copies these files into
+# projects that normalise to LF; a CRLF checkout made every copied file show as modified there.
+* text=auto eol=lf
 *.png binary
 *.jpg binary
+*.webp binary
 *.svg text
