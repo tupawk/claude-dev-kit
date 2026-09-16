@@ -1,0 +1,20 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+.claude/test-scope
+.claude/agent-memory-local/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Build and dependency output (profiles append their own)
+dist/
+build/
+coverage/
+*.log

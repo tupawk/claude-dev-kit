@@ -1,0 +1,6 @@
+# Normalise line endings; shell scripts must stay LF or bash on Windows checkouts may break.
+* text=auto
+*.sh text eol=lf
+*.png binary
+*.jpg binary
+*.svg text

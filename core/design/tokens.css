@@ -1,0 +1,173 @@
+/* Design tokens. Source of truth for every frontend built on the kit.
+   The palette below is a neutral placeholder. Replace the --brand-* values with your own colours
+   (one edit, in this file only) and everything downstream follows. Do not add colours anywhere else.
+   Import once at the app root. Components reference variables only. */
+
+:root {
+  /* Brand palette. Contrast notes (see design/README.md): --brand-primary and --brand-accent reach
+     about 4.5:1 and 4.3:1 on white, so they suit interactive elements, stats, and headings rather than
+     long body text. --brand-highlight is a dark-surface colour (1.8:1 on white).
+     Body text on light surfaces is --brand-ink-body. */
+  --brand-dark: #1F2933;       /* dominant dark: backgrounds, headers, footers */
+  --brand-primary: #2F6FED;    /* links, buttons, focus, key UI */
+  --brand-accent: #D9480F;     /* emphasis and the primary call to action only, use sparingly */
+  --brand-highlight: #F5B942;  /* callouts and emphasized words on dark surfaces */
+  --brand-gray-700: #52606D;   /* secondary text, dividers */
+  --brand-gray-500: #9AA5B1;   /* borders, tertiary, muted labels */
+
+  /* Derived neutrals (tints of the grays, not new brand colours) */
+  --brand-gray-300: #CBD2D9;
+  --brand-gray-200: #E4E7EB;
+  --brand-gray-100: #F5F7FA;   /* light section background */
+  --brand-white: #FFFFFF;
+  --brand-ink-heading: #1F2933; /* headings on light backgrounds */
+  --brand-ink-body: #212121;    /* body copy on light backgrounds */
+
+  /* Semantic roles. Components use these, not the raw palette above. */
+  --color-bg: var(--brand-white);
+  --color-bg-subtle: var(--brand-gray-100);
+  --color-bg-inverse: var(--brand-dark);
+  --color-text: var(--brand-dark);
+  --color-text-heading: var(--brand-ink-heading);
+  --color-text-body: var(--brand-ink-body);
+  --color-text-secondary: var(--brand-gray-700);
+  --color-text-muted: var(--brand-gray-500);
+  --color-text-inverse: var(--brand-white);
+  --color-border: var(--brand-gray-200);
+  --color-border-strong: var(--brand-gray-300);
+  --color-primary: var(--brand-primary);
+  --color-primary-hover: #2459C4;
+  --color-accent: var(--brand-accent);
+  --color-accent-hover: #B53A0B;
+  --color-highlight: var(--brand-highlight);
+  --color-focus: var(--brand-primary);
+  --color-success: #2E7D4F;
+  --color-warning: var(--brand-highlight);
+  --color-danger: var(--brand-accent);
+
+  /* Typography. Swap --font-sans for your typeface; the scale and weights stay.
+     Display headings are LIGHT (300), section headings are BOLD (700). The weight contrast is the look. */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+  --text-4xl: 2.25rem;
+  --leading-tight: 1.2;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+  --weight-light: 300;        /* display headlines, hero, big stats */
+  --weight-regular: 400;      /* body */
+  --weight-medium: 500;       /* buttons, nav */
+  --weight-semibold: 600;
+  --weight-bold: 700;         /* section and card headings */
+
+  /* Type roles, desktop */
+  --display-size: 2.625rem;   /* 42px hero h1, weight 300, line-height 1.2 */
+  --display-lg: 2.875rem;     /* 46px big stats and dark-section h2, weight 300 */
+  --heading-1: 2.5rem;        /* 40px section h2, weight 300 */
+  --heading-2: 1.75rem;       /* 28px section h2, weight 700 */
+  --heading-3: 1.5rem;        /* 24px card and list headings, weight 700 */
+  --heading-4: 1.375rem;      /* 22px, weight 700 */
+  --body-lg: 1.125rem;        /* 18px lead paragraphs */
+  --body: 1rem;
+  --body-sm: 0.875rem;        /* 14px supporting copy */
+
+  /* Spacing, 4px grid */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+
+  /* Shape and elevation */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-image: 30px;        /* images: one rounded corner (bottom-right), rest square */
+  --radius-pill: 100px;        /* buttons are pills */
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px rgba(31, 41, 51, 0.08);
+  --shadow-md: 0 4px 12px rgba(31, 41, 51, 0.10);
+  --shadow-lg: 0 12px 32px rgba(31, 41, 51, 0.14);
+
+  /* Motion */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layout */
+  --container-max: 1200px;
+  --content-max: 72ch;
+}
+
+/* Dark surface variant: apply .inverse to hero sections, headers, footers */
+.inverse {
+  --color-bg: var(--brand-dark);
+  --color-bg-subtle: #2B3644;
+  --color-text: var(--brand-white);
+  --color-text-secondary: var(--brand-gray-200);
+  --color-text-muted: var(--brand-gray-300);
+  --color-border: rgba(255, 255, 255, 0.16);
+  --color-border-strong: rgba(255, 255, 255, 0.28);
+  --color-primary: #7FA7F5;
+  --color-primary-hover: #9DBCF8;
+  --color-text-heading: var(--brand-white);
+  --color-text-body: var(--brand-white);
+  --color-focus: var(--brand-highlight);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+/* Buttons: pill, outlined, 500 weight, 16px.
+   Primary on dark = white outline; primary on light = primary outline or fill; CTA = accent outline. */
+.btn {
+  display: inline-block;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  font-weight: var(--weight-medium);
+  line-height: 1.2;
+  padding: 10px 30px;
+  border-radius: var(--radius-pill);
+  border: 1px solid currentColor;
+  background: transparent;
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: background var(--duration-base) var(--ease-standard), color var(--duration-base) var(--ease-standard);
+}
+.btn:hover, .btn:focus-visible { background: var(--color-primary); color: var(--brand-white); }
+.btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.btn--accent { color: var(--brand-white); border-color: var(--brand-accent); }
+.btn--accent:hover { background: var(--brand-accent); border-color: var(--brand-accent); }
+.btn--solid { background: var(--color-primary); color: var(--brand-white); border-color: var(--color-primary); }
+.inverse .btn { color: var(--brand-white); border-color: var(--brand-white); }
+.inverse .btn:hover { background: var(--brand-white); color: var(--brand-dark); }
+
+/* Display type helpers */
+.display { font-size: var(--display-size); font-weight: var(--weight-light); line-height: var(--leading-tight); }
+.display em, .display strong { font-style: normal; font-weight: var(--weight-bold); color: var(--brand-highlight); } /* emphasized words in a dark hero are highlight, bold */
+.stat { font-size: var(--display-lg); font-weight: var(--weight-light); color: var(--brand-accent); line-height: 1; }
+.stat + p { font-size: var(--body-lg); color: var(--color-text-secondary); margin-top: var(--space-2); }
+
+/* Image treatment: one rounded corner */
+.img-rounded { border-radius: 0 0 var(--radius-image) 0; display: block; max-width: 100%; }
+
+/* Logo: put your files in design/logo/ and document them in design/logo/README.md.
+   Set width only, never both dimensions, so the aspect ratio is preserved.
+   <img class="logo" src="/design/logo/logo-full.svg" alt="Project or organisation name"> */
+.logo { width: 180px; height: auto; display: block; }
+.logo--sm { width: 120px; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --duration-fast: 0ms; --duration-base: 0ms; }
+}
