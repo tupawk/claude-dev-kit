@@ -4,16 +4,20 @@
 
 Rules of use are in `.claude/rules/frontend.md`, loaded automatically when frontend files are touched. A PreToolUse hook blocks hex colour literals written anywhere outside this directory.
 
-## Making it yours
+## Making it yours: a design pack
 
-The palette that ships with the kit is a neutral placeholder. To adopt your own colours:
+The palette that ships with the kit is a neutral placeholder. Your own colours, typeface and logo live in a *design pack*, a small repo or directory named by `design.pack` in `.claude/kit.json`, which the kit's script overlays onto this directory on every run. Do not edit the files here by hand; the next `update` rewrites them from the kit and the pack.
 
-1. Edit the `--brand-*` values at the top of `tokens.css`. Keep the roles (dark, primary, accent, highlight, two grays); change the hex.
-2. Re-measure contrast (see below) and adjust the notes in this file and in `.claude/rules/design-system.md`.
-3. If you have a logo, drop the files into `design/logo/` and write a short `design/logo/README.md` saying which file goes on which background and the native aspect ratio of each.
-4. Change `--font-sans` if you use a different typeface.
+A pack holds:
 
-Everything else (hook, frontend rule, Definition of Done) reads from these files and needs no change.
+1. `brand.css`: a `:root { }` block that overrides the `--brand-*` values (keep the roles: dark, primary, accent, highlight, the grays, the inks), `--font-sans`, and any semantic role whose literal the kit sets (`--color-primary-hover`, `--color-accent-hover`). It is appended to `tokens.css`, so later declarations win. A pack may instead ship a whole `tokens.css` and replace the kit's.
+2. `design-system.md`: the kit's rule file with the hex table rewritten for your palette; it replaces `.claude/rules/design-system.md` so documents and decks use the right values.
+3. `README.md`: what each colour is for and the measured contrast (see below), which lands here as this file.
+4. `logo/`: logo files plus a short README saying which file goes on which background and the native aspect ratio of each.
+
+Everything else (hook, frontend rule, Definition of Done) reads the roles, not the values, and needs no change. Which pack and revision is applied is recorded in `.claude/DESIGN_PACK`.
+
+Files that legitimately cannot follow the tokens (a vendored theme, a stylesheet that is itself another app's token source) go in `design.exempt` in `.claude/kit.json` rather than being edited around the hook.
 
 ## Framework integration
 

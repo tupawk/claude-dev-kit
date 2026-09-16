@@ -1,18 +1,17 @@
-name: CI
-on:
-  pull_request:
-  push:
-    branches: [main]
-jobs:
-  quality:
+  __JOB__:
+    name: __JOB__ (typescript)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: __PATH__
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version-file: __PATH__/.nvmrc
           cache: pnpm
+          cache-dependency-path: __PATH__/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint

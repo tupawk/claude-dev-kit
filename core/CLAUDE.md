@@ -6,7 +6,7 @@ This file is the index. It stays under 200 lines. Details live in the files it p
 
 - **Name:** <project name>
 - **Purpose:** <one sentence: who uses it and what problem it solves>
-- **Stack profile:** <typescript | python | scripts> (see `docs/STACK.md` for commands and layout)
+- **Stack profile(s):** <typescript | python | scripts> (see `docs/STACK.md` for commands and layout; the package list, design pack and hook settings are in `.claude/kit.json`)
 - **project_size:** full
   - `full` = all gates on: approved plan before code, TDD, security review, Definition of Done
   - `small` = single-purpose utility: plan can be a short PLAN.md, tests still required, reviews optional
@@ -34,7 +34,7 @@ Feature branches off `main`, conventional commits (`feat:`, `fix:`, `docs:`, `te
 
 ## Frontend (when the project has one)
 
-Clean, modern, restrained. Design tokens only, from `design/tokens.css`. No hardcoded colors, fonts, or spacing. The dark surface dominates, the primary colour marks interactive elements, the accent is for emphasis only. Accessible by default (WCAG AA contrast, keyboard navigable, semantic HTML). Logos and images: set width only, never both dimensions. Frontend-specific rules load from `.claude/rules/frontend.md` when frontend files are touched; `.claude/rules/design-system.md` covers documents, decks, and other non-web output.
+Clean, modern, restrained. Design tokens only, from `design/tokens.css` (the brand values come from the design pack named in `.claude/kit.json`). No hardcoded colors, fonts, or spacing. The dark surface dominates, the primary colour marks interactive elements, the accent is for emphasis only. Accessible by default (WCAG AA contrast, keyboard navigable, semantic HTML). Logos and images: set width only, never both dimensions. Frontend-specific rules load from `.claude/rules/frontend.md` when frontend files are touched; `.claude/rules/design-system.md` covers documents, decks, and other non-web output.
 
 ## Secrets and safety
 
@@ -46,4 +46,4 @@ See `docs/STACK.md` for the exact install, test, lint, format, and run commands 
 
 ## Updating these standards
 
-Standards are versioned in the `claude-dev-kit` repo. Fix mistakes there, not only here. After any mistake Claude makes that a rule could have prevented, add the rule to the kit and note it in the kit CHANGELOG.
+Standards are versioned in the `claude-dev-kit` repo. Fix mistakes there, not only here: a local edit to anything under `.claude/agents`, `skills`, `rules` or `hooks` is erased by the next `new-project.sh update`. Per-project settings go in `.claude/kit.json`. After any mistake Claude makes that a rule could have prevented, add the rule to the kit and note it in the kit CHANGELOG.
