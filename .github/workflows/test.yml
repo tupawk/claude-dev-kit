@@ -1,0 +1,50 @@
+# The kit's own checks. The hooks are guardrails that run on every machine a project is opened
+# on, so they are tested on all three: Linux, macOS (BSD grep and sed, bash 3.2) and Windows
+# (Git Bash, where the kit was first written and first broke).
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hooks:
+    name: hooks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        # Git Bash on Windows, the same shell the hooks run under there.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Every shell script parses
+        run: |
+          status=0
+          while IFS= read -r script; do
+            bash -n "$script" || { echo "::error file=$script::bash -n failed"; status=1; }
+          done < <(git ls-files '*.sh')
+          exit $status
+
+      - name: kit.py compiles
+        run: python -m py_compile core/.claude/hooks/kit.py
+
+      - name: Hook tests
+        run: python -m unittest discover -s tests -v

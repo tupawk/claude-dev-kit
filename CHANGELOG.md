@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- `.github/workflows/test.yml`: the kit's first CI. On every pull request and push to `main` it runs
+  `bash -n` over every shell script, compiles `kit.py`, and runs the hook tests on Linux, macOS and
+  Windows (Git Bash), because the hooks run on all three and had only ever been run on one.
 - `tests/test_block_dangerous_git.py`: the kit's first tests. Standard library only
   (`python -m unittest discover -s tests -v`); builds throwaway repositories and runs the hook the way
   `settings.json` does. Covers the three defects in #5, the bypass above, and every block that must not loosen.

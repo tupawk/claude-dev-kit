@@ -59,7 +59,7 @@ Same command, pointed at the existing directory. The script adds `.claude/`, `de
 python -m unittest discover -s tests -v
 ```
 
-Standard library only. The tests build throwaway git repositories, copy `core/.claude/hooks` into one the way `new-project.sh` does, and run the git safety hook by the same relative path `settings.json` uses. Run them before changing `block-dangerous-git.sh`, `lib.sh` or `kit.py`: a guardrail that blocks good commands gets switched off, and one that misses bad ones is worse.
+Standard library only. The tests build throwaway git repositories, copy `core/.claude/hooks` into one the way `new-project.sh` does, and run the git safety hook by the same relative path `settings.json` uses. CI runs the same command on Linux, macOS and Windows for every pull request (`.github/workflows/test.yml`), along with `bash -n` over every shell script. Run them locally before changing `block-dangerous-git.sh`, `lib.sh` or `kit.py`: a guardrail that blocks good commands gets switched off, and one that misses bad ones is worse.
 
 ## Update a project to the latest standards
 
