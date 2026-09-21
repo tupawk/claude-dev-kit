@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- `tests/test_block_dangerous_git.py`: the kit's first tests. Standard library only
+  (`python -m unittest discover -s tests -v`); builds throwaway repositories and runs the hook the way
+  `settings.json` does. Covers the three defects in #5, the bypass above, and every block that must not loosen.
 - "Before you write" ladder in `engineering-principles.md`: does it need to exist, does it already exist here, stdlib, native platform, installed dependency, then the minimum. Explicitly never removes boundary validation, data-loss handling, security, accessibility, tests, or requested behaviour. Bug fixes now start by grepping every caller and fixing the shared code once.
 - `defer: <ceiling>, <upgrade path>` comment convention for deliberate shortcuts. `/definition-of-done` check 11 lists every marker in the diff and fails on a marker missing either half; code-reviewer checks the same.
 - `/simplify-review` skill: over-engineering-only review of the diff, a path, or the repo, with `delete:`, `stdlib:`, `native:`, `yagni:`, `shrink:` tags and a net line count. Applies nothing.
@@ -11,6 +14,21 @@
 - `scripts/measure-rule.sh`: clones a project per run, runs `claude -p` headless with `--setting-sources project` so no user-level plugins leak in, and compares added lines, cost, turns, and time between the current kit and a candidate overlay (or bare Claude Code when no overlay is given).
 
 ### Fixed
+- **The git safety hook judged the wrong repository and the wrong moment (#5).** The protected-branch
+  check read the session project's HEAD whatever the command targeted, so a commit on a feature branch
+  in a sibling repository was refused while the project sat on `main`, and `git checkout -b x && git
+  commit` was refused because HEAD is read before the command runs. `kit.py commit-branches` now reads
+  the command far enough to follow `cd <dir>`, `git -C <dir>` and an earlier `checkout`/`switch` in the
+  same command, and the hook judges each commit against the branch it will land on. What it cannot
+  follow is judged against the project's HEAD, as before.
+- **A hole the same work found:** the old pattern wanted `git` and `commit` side by side, so
+  `git -C . commit`, `git -c k=v commit` and `git --no-pager commit` on `main` were never checked at
+  all. They are now. Text that only mentions a commit (`git log --grep`, an `echo`, a heredoc body,
+  `git commit-graph`) no longer trips the check.
+- **`lib.sh` lost `kit.py` after its own `cd`.** `KIT_LIB_DIR` was resolved from a relative
+  `BASH_SOURCE` after changing to `CLAUDE_PROJECT_DIR`; when the two differed (the app moved the
+  session, a worktree was removed) every guard hook failed closed on every Bash call with a message
+  about Python. It is resolved first now, and the block message names the missing file.
 - **Line endings.** `.gitattributes` (the kit's and the one given to projects) now sets `* text=auto eol=lf`,
   so a checkout is LF whatever `core.autocrlf` says, and `new-project.sh` strips CR from every text file
   it copies, from the kit and from a design pack. A CRLF checkout used to make every copied `.md`,
