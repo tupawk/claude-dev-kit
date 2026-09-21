@@ -114,6 +114,23 @@ class TheCommitIsJudgedInTheRepoItTargets(HookCase):
             self.run_hook(f'git -C "{posix(sibling)}" commit -am "x"', cwd=project)
         )
 
+    @unittest.skipUnless(os.name == "nt", "Git Bash drive paths only exist on Windows")
+    def test_a_git_bash_drive_path_is_followed(self) -> None:
+        # Git Bash spells C:\\Users\\x as /c/Users/x, and that is how a command arrives. Native
+        # Windows Python does not know that spelling, so the target looked unknowable and the
+        # commit was judged against the project (found 2026-09-21, the first day the fix was live).
+        project = self.project("main")
+        sibling = make_repo(self.tmp / "pack", "docs/email-rule")
+        drive, rest = posix(sibling.resolve()).split(":", 1)
+        for spelling in (f"/{drive.lower()}{rest}", f"/cygdrive/{drive.lower()}{rest}"):
+            with self.subTest(spelling=spelling):
+                self.assert_allowed(
+                    self.run_hook(f'cd {spelling} && git commit -am "x"', cwd=project)
+                )
+                self.assert_allowed(
+                    self.run_hook(f'git -C {spelling} commit -am "x"', cwd=project)
+                )
+
     def test_a_sibling_that_is_itself_on_main_is_blocked(self) -> None:
         project = self.project("feat/something")
         sibling = make_repo(self.tmp / "pack", "main")

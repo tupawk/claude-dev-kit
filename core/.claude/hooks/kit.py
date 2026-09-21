@@ -132,6 +132,7 @@ LOOKS_LIKE_A_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b(?!-)")
 NEWLINE = "\n"
 BACKSLASH = "\\"
 GIT_TIMEOUT_SECONDS = 10
+GIT_BASH_DRIVE = re.compile(r"^/(?:cygdrive/)?([A-Za-z])(?:/|$)")
 
 
 def run_git(directory: str, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -217,9 +218,19 @@ def switched_to(args: list[str], directory: str) -> str:
     return names[0] if names and is_branch(directory, names[0]) else ""
 
 
+def native_path(path: str) -> str:
+    """`path` as this Python spells it. Git Bash writes C:\\Users as /c/Users (Cygwin: /cygdrive/c).
+
+    A command arrives in the shell's spelling and native Windows Python does not know it, so a
+    `cd /c/Users/x` looked like a directory that does not exist. Elsewhere this changes nothing.
+    """
+    drive = GIT_BASH_DRIVE.match(path) if os.name == "nt" else None
+    return f"{drive.group(1)}:/{path[drive.end():]}" if drive else path
+
+
 def resolve_dir(base: str, path: str) -> str | None:
     """`path` as a directory relative to `base`, or None when it cannot be found."""
-    target = os.path.normpath(os.path.join(base, os.path.expanduser(path)))
+    target = os.path.normpath(os.path.join(base, os.path.expanduser(native_path(path))))
     return target if os.path.isdir(target) else None
 
 

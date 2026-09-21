@@ -14,6 +14,10 @@
 - `scripts/measure-rule.sh`: clones a project per run, runs `claude -p` headless with `--setting-sources project` so no user-level plugins leak in, and compares added lines, cost, turns, and time between the current kit and a candidate overlay (or bare Claude Code when no overlay is given).
 
 ### Fixed
+- The git safety hook did not follow a directory written the way Git Bash writes it (`/c/Users/x`,
+  or Cygwin's `/cygdrive/c/...`). Native Windows Python does not know that spelling, so the target
+  looked unknowable and the commit was judged against the project. `kit.py` translates it on Windows
+  only. Found the first day the #5 fix was live; the tests had only used the `C:/` spelling.
 - **The git safety hook judged the wrong repository and the wrong moment (#5).** The protected-branch
   check read the session project's HEAD whatever the command targeted, so a commit on a feature branch
   in a sibling repository was refused while the project sat on `main`, and `git checkout -b x && git
