@@ -30,6 +30,28 @@ BLOCKED = 2
 ALLOWED = 0
 
 
+def find_bash() -> str:
+    """The bash the hooks really run under.
+
+    On Windows that is Git Bash, and it has to be found by path: starting a process called
+    "bash" there searches System32 before PATH, and System32 holds the WSL launcher, which
+    exits 1 with no distribution installed. GitHub's Windows runners have it; the machine this
+    was written on did not, so the first CI run failed every test with a bare exit 1.
+    """
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            # git.exe sits in Git/cmd, Git/bin or Git/mingw64/bin depending on the install.
+            for root in list(Path(git).resolve().parents)[:3]:
+                candidate = root / "bin" / "bash.exe"
+                if candidate.is_file():
+                    return str(candidate)
+    return shutil.which("bash") or "bash"
+
+
+BASH = find_bash()
+
+
 def git(cwd: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
@@ -72,7 +94,7 @@ class HookCase(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir or cwd)}
         return subprocess.run(
-            ["bash", HOOK_RELATIVE],
+            [BASH, HOOK_RELATIVE],
             input=json.dumps({"tool_input": {"command": command}}),
             cwd=cwd,
             env=env,
@@ -113,6 +135,23 @@ class TheCommitIsJudgedInTheRepoItTargets(HookCase):
         self.assert_allowed(
             self.run_hook(f'git -C "{posix(sibling)}" commit -am "x"', cwd=project)
         )
+
+    @unittest.skipUnless(os.name == "nt", "Git Bash drive paths only exist on Windows")
+    def test_a_git_bash_drive_path_is_followed(self) -> None:
+        # Git Bash spells C:\\Users\\x as /c/Users/x, and that is how a command arrives. Native
+        # Windows Python does not know that spelling, so the target looked unknowable and the
+        # commit was judged against the project (found 2026-09-21, the first day the fix was live).
+        project = self.project("main")
+        sibling = make_repo(self.tmp / "pack", "docs/email-rule")
+        drive, rest = posix(sibling.resolve()).split(":", 1)
+        for spelling in (f"/{drive.lower()}{rest}", f"/cygdrive/{drive.lower()}{rest}"):
+            with self.subTest(spelling=spelling):
+                self.assert_allowed(
+                    self.run_hook(f'cd {spelling} && git commit -am "x"', cwd=project)
+                )
+                self.assert_allowed(
+                    self.run_hook(f'git -C {spelling} commit -am "x"', cwd=project)
+                )
 
     def test_a_sibling_that_is_itself_on_main_is_blocked(self) -> None:
         project = self.project("feat/something")
