@@ -30,6 +30,28 @@ BLOCKED = 2
 ALLOWED = 0
 
 
+def find_bash() -> str:
+    """The bash the hooks really run under.
+
+    On Windows that is Git Bash, and it has to be found by path: starting a process called
+    "bash" there searches System32 before PATH, and System32 holds the WSL launcher, which
+    exits 1 with no distribution installed. GitHub's Windows runners have it; the machine this
+    was written on did not, so the first CI run failed every test with a bare exit 1.
+    """
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            # git.exe sits in Git/cmd, Git/bin or Git/mingw64/bin depending on the install.
+            for root in list(Path(git).resolve().parents)[:3]:
+                candidate = root / "bin" / "bash.exe"
+                if candidate.is_file():
+                    return str(candidate)
+    return shutil.which("bash") or "bash"
+
+
+BASH = find_bash()
+
+
 def git(cwd: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
@@ -72,7 +94,7 @@ class HookCase(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir or cwd)}
         return subprocess.run(
-            ["bash", HOOK_RELATIVE],
+            [BASH, HOOK_RELATIVE],
             input=json.dumps({"tool_input": {"command": command}}),
             cwd=cwd,
             env=env,
