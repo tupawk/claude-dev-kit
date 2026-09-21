@@ -6,6 +6,9 @@
 # (default: main and master). An empty list turns that one check off; the kit recommends leaving it on.
 INPUT=$(cat)
 . "$(dirname "$0")/lib.sh"
+if [ -z "$KIT_LIB_DIR" ] || [ ! -f "$KIT_LIB_DIR/kit.py" ]; then
+  echo "Blocked by the git safety hook: kit.py was not found next to lib.sh (looked in '${KIT_LIB_DIR:-?}'), so the tool input cannot be parsed. Fix the hook install; do not bypass the hook." >&2; exit 2
+fi
 if [ -z "$KIT_PY" ]; then
   # Fail closed: a guardrail that cannot read its input must not wave the command through.
   echo "Blocked by the git safety hook: no working Python 3 on PATH, so the tool input cannot be parsed. Fix the environment; do not bypass the hook." >&2; exit 2
@@ -28,11 +31,16 @@ echo "$CMD" | grep -Eq 'git\s+clean\s+-[a-zA-Z]*f' && block "git clean -f"
 echo "$CMD" | grep -Eq 'git\s+rebase\s+.*(-i|--interactive)' && block "interactive rebase (do it manually if needed)"
 echo "$CMD" | grep -Eq 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(/|~|\$HOME|\.\.)(\s|$)' && block "recursive delete of a root, home, or parent directory"
 
-# Block commits while on a protected branch
-if echo "$CMD" | grep -Eq 'git\s+commit'; then
-  BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null)
+# Block commits that would land on a protected branch. kit.py reads the command far enough to know
+# WHERE each commit lands: another repository (`cd`, `git -C`), or a branch an earlier segment of the
+# same command checks out. What it cannot follow is judged against the project's HEAD, as before.
+if echo "$CMD" | grep -Eq '\bgit\b' && echo "$CMD" | grep -Eq '\bcommit\b'; then
+  BRANCHES=$(printf '%s' "$INPUT" | kit commit-branches 2>/dev/null) || block "could not work out which branch this commit lands on"
   while read -r PROTECTED; do
-    [ -n "$PROTECTED" ] && [ "$BRANCH" = "$PROTECTED" ] && block "committing directly to $BRANCH. Create a feature branch first"
+    [ -z "$PROTECTED" ] && continue
+    while read -r BRANCH; do
+      [ "$BRANCH" = "$PROTECTED" ] && block "committing directly to $BRANCH. Create a feature branch first"
+    done <<< "$BRANCHES"
   done < <(kit protected-branches 2>/dev/null)
 fi
 exit 0

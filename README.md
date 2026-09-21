@@ -53,6 +53,14 @@ The hooks then run each package's tools from that package's directory: an edit u
 
 Same command, pointed at the existing directory. The script adds `.claude/`, `design/`, `docs/STACK.md` and the PR template, creates `.claude/kit.json`, CI and the docs templates only where they are missing, appends its own entries to an existing `.gitignore` once, and never touches `CLAUDE.md`, `README.md` or code. Delete any template that duplicates a convention the project already has (say, `docs/DECISIONS/` when it keeps ADRs in `docs/adr/`); the script does not recreate it.
 
+## Test the kit itself
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Standard library only. The tests build throwaway git repositories, copy `core/.claude/hooks` into one the way `new-project.sh` does, and run the git safety hook by the same relative path `settings.json` uses. Run them before changing `block-dangerous-git.sh`, `lib.sh` or `kit.py`: a guardrail that blocks good commands gets switched off, and one that misses bad ones is worse.
+
 ## Update a project to the latest standards
 
 ```bash
