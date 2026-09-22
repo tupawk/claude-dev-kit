@@ -2,8 +2,27 @@
   "permissions": {
     "deny": [
       "Read(./.env)",
-      "Read(./.env.*)",
       "Read(./**/.env)",
+      "Read(./.env.?)",
+      "Read(./.env.??)",
+      "Read(./.env.???)",
+      "Read(./.env.????)",
+      "Read(./.env.?????)",
+      "Read(./.env.??????)",
+      "Read(./.env.????????*)",
+      "Read(./.env.staging)",
+      "Read(./.env.secrets)",
+      "Read(./.env.private)",
+      "Read(./.env.testing)",
+      "Read(./.env.preview)",
+      "Read(./.env.release)",
+      "Read(./.env.default)",
+      "Read(./.env.develop)",
+      "Read(./.env.sandbox)",
+      "Read(./.env.backups)",
+      "Read(./.env.current)",
+      "Read(./.env.archive)",
+      "Read(./.env.encrypt)",
       "Bash(git push --force*)",
       "Bash(git push -f*)"
     ]
