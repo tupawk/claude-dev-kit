@@ -145,6 +145,12 @@ import json, sys, os
 core, out = sys.argv[1:3]
 def load(p): return json.load(open(p)) if os.path.exists(p) else {}
 existing = load(out)
+# Rules the kit used to ship and has since replaced. The merge keeps a project's own rules, so without
+# this list a retired kit rule would survive every refresh. Read(./.env.*) also matched .env.example,
+# which the secrets rule tells Claude to read; the length-based .env patterns in core replace it.
+RETIRED = {"Read(./.env.*)"}
+for kind, rules in existing.get("permissions", {}).items():
+    existing["permissions"][kind] = [r for r in rules if r not in RETIRED]
 merged = {}
 for src in (existing, load(core)):
     for k, v in src.items():

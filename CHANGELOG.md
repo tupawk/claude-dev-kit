@@ -17,6 +17,15 @@
 - `scripts/measure-rule.sh`: clones a project per run, runs `claude -p` headless with `--setting-sources project` so no user-level plugins leak in, and compares added lines, cost, turns, and time between the current kit and a candidate overlay (or bare Claude Code when no overlay is given).
 
 ### Fixed
+- **`.env.example` is readable again.** The deny rule `Read(./.env.*)` also matched `.env.example`, the one file
+  the secrets rule tells Claude to read. It is replaced by rules built from `*` and `?` only: `.env`, every
+  `.env.<suffix>` of one to six characters or eight and more, and the seven-letter names `staging`, `secrets`,
+  `private`, `testing`, `preview`, `release`, `default`, `develop`, `sandbox`, `backups`, `current`, `archive`,
+  `encrypt`. Bracket negation was tried first and does not work: Claude Code's matcher reads `[!e]` and `[^e]` as
+  literal characters, which left `.env.example` blocked and opened `.env.zz`. Ceiling: an unlisted seven-letter
+  suffix is readable; add it to the list. `new-project.sh` now drops retired kit rules when it merges a
+  project's `settings.json`, because the merge keeps existing rules and the old one would otherwise survive
+  every refresh. `tests/test_env_deny_rules.py` covers both.
 - The git safety hook did not follow a directory written the way Git Bash writes it (`/c/Users/x`,
   or Cygwin's `/cygdrive/c/...`). Native Windows Python does not know that spelling, so the target
   looked unknowable and the commit was judged against the project. `kit.py` translates it on Windows
