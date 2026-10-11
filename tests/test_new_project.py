@@ -137,6 +137,20 @@ class AnUpdate(unittest.TestCase):
         self.assertFalse(retired.exists())
         self.assertTrue((project / ".claude" / "rules" / "secrets.md").is_file())
 
+    def test_skips_a_manifest_entry_that_is_a_directory(self) -> None:
+        sandbox = Sandbox(self)
+        project = sandbox.new("python")
+        (project / ".claude" / "skills" / "mine").mkdir(parents=True)
+        (project / ".claude" / "skills" / "mine" / "SKILL.md").write_text("mine\n", encoding="utf-8")
+        manifest = project / ".claude" / "KIT_FILES"
+        manifest.write_text(manifest.read_text(encoding="utf-8") + ".claude/skills/mine\n", encoding="utf-8")
+
+        result = sandbox.update(project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((project / ".claude" / "skills" / "mine" / "SKILL.md").is_file())
+        self.assertFalse((project / ".claude" / "KIT_FILES.new").exists())
+
 
 class TheSettingsMerge(unittest.TestCase):
     """The merge spelled a scalar permission setting as a list of letters and dropped project hooks."""
@@ -166,6 +180,40 @@ class TheSettingsMerge(unittest.TestCase):
         kit_git_guard = [e for e in pre if any("block-dangerous-git.sh" in h["command"] for h in e["hooks"])]
         self.assertEqual(len(kit_git_guard), 1)
 
+    def test_drops_the_entry_for_a_kit_hook_the_kit_no_longer_ships(self) -> None:
+        sandbox = Sandbox(self)
+        project = sandbox.new("python")
+        (project / ".claude" / "hooks" / "old-kit.sh").write_text("exit 0\n", encoding="utf-8")
+        manifest = project / ".claude" / "KIT_FILES"
+        manifest.write_text(manifest.read_text(encoding="utf-8") + ".claude/hooks/old-kit.sh\n", encoding="utf-8")
+        path = project / ".claude" / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        settings["hooks"]["PreToolUse"].append(
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "bash .claude/hooks/old-kit.sh"}]}
+        )
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        self.assertEqual(sandbox.update(project).returncode, 0)
+
+        self.assertFalse((project / ".claude" / "hooks" / "old-kit.sh").exists())
+        self.assertNotIn("old-kit.sh", path.read_text(encoding="utf-8"))
+
+    def test_recognises_a_kit_hook_spelled_with_the_project_dir_variable(self) -> None:
+        sandbox = Sandbox(self)
+        project = sandbox.new("python")
+        path = project / ".claude" / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        for entry in settings["hooks"]["PreToolUse"]:
+            for hook in entry["hooks"]:
+                hook["command"] = hook["command"].replace("bash .claude/", 'bash "$CLAUDE_PROJECT_DIR"/.claude/')
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        self.assertEqual(sandbox.update(project).returncode, 0)
+
+        merged = json.loads(path.read_text(encoding="utf-8"))
+        commands = [h["command"] for e in merged["hooks"]["PreToolUse"] for h in e["hooks"]]
+        self.assertEqual(sum("block-secrets.sh" in c for c in commands), 1)
+
 
 class AGitPack(unittest.TestCase):
     """The pack cache was keyed on the repo's name alone and refreshed with a fast-forward-only pull."""
@@ -184,6 +232,8 @@ class AGitPack(unittest.TestCase):
 
         rule = (project_b / ".claude" / "rules" / "design-system.md").read_text(encoding="utf-8")
         self.assertIn("Rule from orgB", rule)
+        cached = list((sandbox.root / "cache" / "claude-dev-kit" / "packs").iterdir())
+        self.assertEqual(len(cached), 2, "each pack URL gets its own cache directory")
 
     def test_follows_a_pack_whose_history_was_rewritten(self) -> None:
         sandbox = Sandbox(self)
@@ -225,6 +275,28 @@ class AFailingUpdate(unittest.TestCase):
         set_kit_json(project, packages=[{"profile": "python", "path": "wrokers/agnet"}])
         self.assertIn("wrokers/agnet", self.assert_refused_untouched(sandbox, project).stderr)
         self.assertFalse((project / "wrokers").exists())
+
+    def test_refuses_a_package_path_outside_the_project(self) -> None:
+        sandbox = Sandbox(self)
+        project = sandbox.new("python")
+        (sandbox.root / "outside").mkdir()
+        set_kit_json(project, packages=[{"profile": "python", "path": "../outside"}])
+        self.assertIn("../outside", self.assert_refused_untouched(sandbox, project).stderr)
+        self.assertFalse((sandbox.root / "outside" / ".python-version").exists())
+
+    def test_refuses_a_settings_file_it_cannot_merge_before_changing_anything(self) -> None:
+        for bad in ['{"permissions": {},}', '{"permissions": {"deny": "Read(./x)"}}', '{"hooks": []}']:
+            with self.subTest(settings=bad):
+                sandbox = Sandbox(self)
+                project = sandbox.new("python")
+                (project / ".claude" / "settings.json").write_text(bad, encoding="utf-8")
+                self.assertIn("settings.json", self.assert_refused_untouched(sandbox, project).stderr)
+
+    def test_refuses_an_unknown_profile_without_creating_the_directory(self) -> None:
+        sandbox = Sandbox(self)
+        result = sandbox.run("rust", str(sandbox.root / "never"), "X")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((sandbox.root / "never").exists())
 
     def test_refuses_a_missing_pack_before_changing_anything(self) -> None:
         sandbox = Sandbox(self)

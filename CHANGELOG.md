@@ -24,16 +24,22 @@ now covered by `tests/test_new_project.py`, plus the hook fixes merged since 0.3
 - **The settings merge corrupted settings and dropped hooks.** A scalar under `permissions`, such as
   `defaultMode: "acceptEdits"`, came out as a list of single letters, and every hook the project had added
   was discarded. Lists are now unioned, scalars kept, and hooks are the kit's entries plus every entry the
-  project wrote; an entry counts as the kit's only when each of its commands runs a script the kit installed.
-  Repeated updates no longer duplicate the kit's entries.
+  project wrote; an entry counts as the kit's only when each of its commands runs a script the kit installs or
+  installed last time (so the entry for a hook the kit retires goes with the script), written either
+  `bash .claude/hooks/x.sh` or `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`. Repeated updates no longer
+  duplicate the kit's entries.
 - **Two git design packs with the same repo name shared one cache, and a rewritten pack could not be
   updated.** The cache under `~/.cache/claude-dev-kit/packs/` is keyed on the whole URL, a cached clone whose
   `origin` differs is replaced, and a refresh fetches and checks out the pack's default branch instead of a
   fast-forward-only pull. `file://` URLs are accepted as git packs.
 - **A refused update left the project half-written.** Bad input was found after kit files had been deleted and
-  the brand reset to the neutral palette. Profiles, package paths and the design pack are now checked, and a
-  git pack fetched, before the first write; an unknown profile, a package path that does not exist and a
-  missing pack each stop the run with a message naming the culprit and leave the project unchanged.
+  the brand reset to the neutral palette. Profiles, package paths, `settings.json` and the design pack are now
+  checked, and a git pack fetched, before the first write. An unknown profile, a package path that does not
+  exist or points outside the project, a `settings.json` that is not valid JSON or has the wrong shape, and a
+  missing pack each stop the run with a message naming the culprit and leave the project unchanged; a refused
+  new project leaves no empty directory. A manifest entry that names a directory is skipped rather than
+  aborting the run, and a half-written manifest is never left behind. Pack clones use `core.longpaths` so a
+  deep cache path does not fail on Windows.
 - **The kit's `.gitignore` entries were added twice.** A new project got them from `core/.gitignore`, and the
   first `update` appended them again because that file lacked the marker the script looks for. It has it now.
 - **`.env.example` is readable again.** The deny rule `Read(./.env.*)` also matched `.env.example`, the one file

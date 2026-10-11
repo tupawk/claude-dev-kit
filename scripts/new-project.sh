@@ -33,8 +33,10 @@ sed_escape() { printf '%s' "$1" | sed 's/[&/\]/\\&/g'; }
 PY=""; for c in python3 python "py -3"; do case "$(command -v "${c%% *}" 2>/dev/null)" in *WindowsApps*) continue;; esac; $c -c "import sys; sys.exit(sys.version_info[0] != 3)" >/dev/null 2>&1 && { PY="$c"; break; }; done  # skip the slow, non-functional Windows Store stubs
 [ -n "$PY" ] || die "no working Python 3 found (tried python3, python, py -3). Install Python 3 or fix the PATH."
 
-mkdir -p "$TARGET"
-TARGET="$(cd "$TARGET" && pwd)"
+# The target is created only after step 0 has checked everything, so a refused new project leaves no
+# empty directory behind. `update` needs it to exist already.
+if [ "$MODE" = "update" ] && [ ! -d "$TARGET" ]; then die "$TARGET is not a directory"; fi
+if [ -d "$TARGET" ]; then TARGET="$(cd "$TARGET" && pwd)"; fi
 KIT_JSON="$TARGET/.claude/kit.json"
 MANIFEST="$TARGET/.claude/KIT_FILES"
 UPDATE=0; [ -f "$TARGET/CLAUDE.md" ] && UPDATE=1                # an existing project, not a blank directory
@@ -72,10 +74,46 @@ while IFS=$'\t' read -r p d; do
     *) [ "$MODE" = "update" ] && die "unknown profile '$p' for package '$d' in .claude/kit.json (expected typescript, python or scripts)"
        echo "Unknown profile: $p" >&2; usage ;;
   esac
+  case "$d" in
+    /*|[A-Za-z]:*|..|../*|*/..|*/../*) die "package path '$d' must be inside the project: no absolute path and no '..'" ;;
+  esac
   if [ "$MODE" = "update" ] && [ ! -d "$TARGET/$d" ]; then
     die "package path '$d' in .claude/kit.json does not exist under $TARGET"
   fi
 done <<< "$PACKAGES"
+
+# settings.json is merged in step 4, after kit files are rewritten; a file the merge cannot read must be
+# refused here, not discovered there. A list the kit adds to (permissions.deny) must be a list.
+if [ -f "$TARGET/.claude/settings.json" ]; then
+  $PY - "$KIT_DIR/core/.claude/settings.json" "$TARGET/.claude/settings.json" <<'PY' || exit 1
+import json, sys
+kit = json.load(open(sys.argv[1], encoding="utf-8"))
+def refuse(problem):
+    print(f"Error: .claude/settings.json {problem}. Fix it by hand; nothing was changed.", file=sys.stderr)
+    sys.exit(1)
+try:
+    project = json.load(open(sys.argv[2], encoding="utf-8"))
+except ValueError as e:
+    refuse(f"is not valid JSON ({e})")
+if not isinstance(project, dict):
+    refuse("must be a JSON object")
+for key in ("permissions", "hooks"):
+    if key in project and not isinstance(project[key], dict):
+        refuse(f'has "{key}" that is not an object')
+for event, entries in project.get("hooks", {}).items():
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        refuse(f'has hooks."{event}" that is not a list of objects')
+for kind, value in kit.get("permissions", {}).items():
+    current = project.get("permissions", {}).get(kind)
+    if isinstance(value, list) and current is not None and not isinstance(current, list):
+        refuse(f'has permissions."{kind}" that is not a list')
+PY
+fi
+
+# The hook scripts the kit installed last time, read before step 1 replaces the manifest: a settings
+# entry running one of them is the kit's even when the kit has since stopped shipping that script.
+OLD_KIT_HOOK_PATHS=""
+if [ -f "$MANIFEST" ]; then OLD_KIT_HOOK_PATHS=$(tr -d '\r' < "$MANIFEST" | grep '^\.claude/hooks/' || true); fi
 
 PACK=""
 [ -f "$KIT_JSON" ] && PACK=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("design",{}).get("pack",""))' "$KIT_JSON")
@@ -89,17 +127,24 @@ if [ -n "$PACK" ]; then
       if [ -d "$PACK_DIR/.git" ] && [ "$(git -C "$PACK_DIR" remote get-url origin 2>/dev/null)" != "$PACK" ]; then
         rm -rf "$PACK_DIR"                                  # the cache is the kit's; a stranger's clone goes
       fi
+      # core.longpaths: the cache path plus a pack's own paths can pass Windows' 260-character limit.
       if [ -d "$PACK_DIR/.git" ]; then
         # fetch + detached checkout, not pull: a pack whose history was rewritten is followed, not refused.
-        git -C "$PACK_DIR" fetch -q origin HEAD || die "could not fetch design pack $PACK"
-        git -C "$PACK_DIR" checkout -q -f --detach FETCH_HEAD || die "could not check out design pack $PACK"
+        git -c core.longpaths=true -C "$PACK_DIR" fetch -q origin HEAD || die "could not fetch design pack $PACK"
+        git -c core.longpaths=true -C "$PACK_DIR" checkout -q -f --detach FETCH_HEAD || die "could not check out design pack $PACK"
       else
         mkdir -p "$(dirname "$PACK_DIR")"
-        git clone -q "$PACK" "$PACK_DIR" || die "could not clone design pack $PACK"
+        git -c core.longpaths=true clone -q "$PACK" "$PACK_DIR" || die "could not clone design pack $PACK"
       fi ;;
     *) PACK_DIR="$(cd "$TARGET" && cd "$PACK" 2>/dev/null && pwd)" || die "design pack '$PACK' (from .claude/kit.json) not found relative to $TARGET" ;;
   esac
 fi
+
+# Everything checks out: from here on the script writes.
+mkdir -p "$TARGET"
+TARGET="$(cd "$TARGET" && pwd)"
+KIT_JSON="$TARGET/.claude/kit.json"
+MANIFEST="$TARGET/.claude/KIT_FILES"
 
 # Text files are written LF whatever the kit or pack checkout has: a CRLF copy into a project that
 # normalises to LF shows every kit file as modified until git renormalises it, and a CRLF hook breaks bash.
@@ -115,6 +160,7 @@ copy_always() {
   copy_file "$1" "$2"; echo "  ~ ${2#"$TARGET"/}"
 }
 NEW_MANIFEST="$MANIFEST.new"
+trap 'rm -f "$NEW_MANIFEST"' EXIT                          # never leave a half-built manifest behind
 kit_install() { # src dst: a kit-owned file under .claude/, recorded so the next update can remove it
   copy_always "$1" "$2"; printf '%s\n' "${2#"$TARGET"/}" >> "$NEW_MANIFEST"
 }
@@ -134,13 +180,17 @@ if [ -f "$MANIFEST" ]; then
     f="${f%$'\r'}"                                           # a manifest saved on Windows ends lines in CR
     case "$f" in
       *..*) continue ;;                                      # never follow a path out of .claude/
-      .claude/agents/*|.claude/skills/*|.claude/rules/*|.claude/hooks/*) rm -f "$TARGET/$f" ;;
+      .claude/agents/*|.claude/skills/*|.claude/rules/*|.claude/hooks/*) ;;
+      *) continue ;;
     esac
+    [ -f "$TARGET/$f" ] || [ -L "$TARGET/$f" ] || continue   # a directory or a missing file is left alone
+    rm -f "$TARGET/$f"
   done < "$MANIFEST"
 fi
 rm -rf "$TARGET/.claude/hooks/__pycache__"
 for dir in agents skills rules hooks; do
-  [ -d "$TARGET/.claude/$dir" ] && find "$TARGET/.claude/$dir" -mindepth 1 -depth -type d -empty -exec rmdir {} \;
+  [ -d "$TARGET/.claude/$dir" ] || continue
+  find "$TARGET/.claude/$dir" -mindepth 1 -depth -type d -empty -exec rmdir {} \;
 done
 ( cd "$KIT_DIR/core" && find .claude -type f ! -name settings.json ! -path '*/__pycache__/*' ) | while read -r f; do
   kit_install "$KIT_DIR/core/$f" "$TARGET/$f"
@@ -203,7 +253,7 @@ copy_always "$KIT_DIR/core/.github/PULL_REQUEST_TEMPLATE.md" "$TARGET/.github/PU
 # kit's entries plus every entry the project wrote itself. A hook entry is the kit's when each of its
 # commands runs a script the kit installs under .claude/hooks/; those are dropped from the project's
 # side and re-added from core, so a refresh never duplicates them and a renamed kit hook goes away.
-KIT_HOOK_PATHS=$(grep '^\.claude/hooks/' "$MANIFEST" || true)
+KIT_HOOK_PATHS="$OLD_KIT_HOOK_PATHS $(grep '^\.claude/hooks/' "$MANIFEST" || true)"
 $PY - "$KIT_DIR/core/.claude/settings.json" "$TARGET/.claude/settings.json" "$KIT_HOOK_PATHS" <<'PY'
 import json, os, re, sys
 core, out, kit_hook_paths = sys.argv[1], sys.argv[2], set(sys.argv[3].split())
@@ -214,7 +264,8 @@ existing, kit = load(out), load(core)
 # this list a retired kit rule would survive every refresh. Read(./.env.*) also matched .env.example,
 # which the secrets rule tells Claude to read; the length-based .env patterns in core replace it.
 RETIRED = {"Read(./.env.*)"}
-KIT_COMMAND = re.compile(r'bash\s+"?(\.claude/hooks/[^"\s]+)"?')
+# `bash .claude/hooks/x.sh`, or the form Claude Code's docs recommend, `bash "$CLAUDE_PROJECT_DIR"/.claude/...`.
+KIT_COMMAND = re.compile(r'bash\s+"?(?:\$\{?CLAUDE_PROJECT_DIR\}?"?/)?(\.claude/hooks/[^"\s]+)"?')
 
 def kit_authored(entry):
     commands = [h.get("command", "") for h in entry.get("hooks", [])]
