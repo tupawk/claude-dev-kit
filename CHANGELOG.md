@@ -1,29 +1,54 @@
 # Changelog
 
+Each release lists what changed since the one before. Work merged after the latest release goes under
+`[Unreleased]` and moves into a numbered section when the release is tagged (README, *Changing the standards*).
+
 ## [Unreleased]
 
-### Added
-- `.github/workflows/test.yml`: the kit's first CI. On every pull request and push to `main` it runs
-  `bash -n` over every shell script, compiles `kit.py`, and runs the hook tests on Linux, macOS and
-  Windows (Git Bash), because the hooks run on all three and had only ever been run on one.
-- `tests/test_block_dangerous_git.py`: the kit's first tests. Standard library only
-  (`python -m unittest discover -s tests -v`); builds throwaway repositories and runs the hook the way
-  `settings.json` does. Covers the three defects in #5, the bypass above, and every block that must not loosen.
-- "Before you write" ladder in `engineering-principles.md`: does it need to exist, does it already exist here, stdlib, native platform, installed dependency, then the minimum. Explicitly never removes boundary validation, data-loss handling, security, accessibility, tests, or requested behaviour. Bug fixes now start by grepping every caller and fixing the shared code once.
-- `defer: <ceiling>, <upgrade path>` comment convention for deliberate shortcuts. `/definition-of-done` check 11 lists every marker in the diff and fails on a marker missing either half; code-reviewer checks the same.
-- `/simplify-review` skill: over-engineering-only review of the diff, a path, or the repo, with `delete:`, `stdlib:`, `native:`, `yagni:`, `shrink:` tags and a net line count. Applies nothing.
-- code-reviewer step 5 produces the same delete list, reported in a new "Delete list" section.
-- `.claude-plugin/` (plugin.json, hooks.json, marketplace.json) so the agents, skills, and hooks can be installed with `/plugin`. Rules, permissions, design tokens, kit.json, and profiles are not plugin-shippable and still come from `new-project.sh`. `lib.sh` now finds `kit.py` next to itself instead of under the project's `.claude/hooks`, so the guard hooks work from a plugin root too.
-- `scripts/measure-rule.sh`: clones a project per run, runs `claude -p` headless with `--setting-sources project` so no user-level plugins leak in, and compares added lines, cost, turns, and time between the current kit and a candidate overlay (or bare Claude Code when no overlay is given).
+## [0.3.1] - 2026-10-11
+
+Fixes from the 2026-10-11 review of `new-project.sh`, each reproduced on a throwaway project first and
+now covered by `tests/test_new_project.py`, plus the hook fixes merged since 0.3.0.
 
 ### Fixed
+- **A new project whose last package was `typescript` was left half-built with no message.** The version-pin
+  loop ended on `[ -f .python-version ] && copy`, which is false for that profile, and `set -e` with
+  `pipefail` ended the script there: no `.gitignore` (so `.env` was not ignored), no git repository, no
+  `KIT_VERSION`, an unfilled project name. The README's own `new-project.sh typescript` example hit it.
+  Every such loop now uses `|| continue`.
+- **`update` deleted a project's own agents, skills, rules and hooks.** It removed `.claude/agents`, `skills`,
+  `rules` and `hooks` whole before copying the kit's files back. The kit now records what it installs in
+  `.claude/KIT_FILES` and removes only those files on the next update, so a file the kit stops shipping
+  still goes and a project's files beside them stay. A project from before the manifest has nothing
+  removed on its first update; its kit files are overwritten and the manifest starts from there.
+- **The settings merge corrupted settings and dropped hooks.** A scalar under `permissions`, such as
+  `defaultMode: "acceptEdits"`, came out as a list of single letters, and every hook the project had added
+  was discarded. Lists are now unioned, scalars kept, and hooks are the kit's entries plus every entry the
+  project wrote; an entry counts as the kit's only when each of its commands runs a script the kit installs or
+  installed last time (so the entry for a hook the kit retires goes with the script), written either
+  `bash .claude/hooks/x.sh` or `bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`. Repeated updates no longer
+  duplicate the kit's entries.
+- **Two git design packs with the same repo name shared one cache, and a rewritten pack could not be
+  updated.** The cache under `~/.cache/claude-dev-kit/packs/` is keyed on the whole URL, a cached clone whose
+  `origin` differs is replaced, and a refresh fetches and checks out the pack's default branch instead of a
+  fast-forward-only pull. `file://` URLs are accepted as git packs.
+- **A refused update left the project half-written.** Bad input was found after kit files had been deleted and
+  the brand reset to the neutral palette. Profiles, package paths, `settings.json` and the design pack are now
+  checked, and a git pack fetched, before the first write. An unknown profile, a package path that does not
+  exist or points outside the project, a `settings.json` that is not valid JSON or has the wrong shape, and a
+  missing pack each stop the run with a message naming the culprit and leave the project unchanged; a refused
+  new project leaves no empty directory. A manifest entry that names a directory is skipped rather than
+  aborting the run, and a half-written manifest is never left behind. Pack clones use `core.longpaths` so a
+  deep cache path does not fail on Windows.
+- **The kit's `.gitignore` entries were added twice.** A new project got them from `core/.gitignore`, and the
+  first `update` appended them again because that file lacked the marker the script looks for. It has it now.
 - **`.env.example` is readable again.** The deny rule `Read(./.env.*)` also matched `.env.example`, the one file
   the secrets rule tells Claude to read. It is replaced by rules built from `*` and `?` only: `.env`, every
   `.env.<suffix>` of one to six characters or eight and more, and the seven-letter names `staging`, `secrets`,
   `private`, `testing`, `preview`, `release`, `default`, `develop`, `sandbox`, `backups`, `current`, `archive`,
   `encrypt`. Bracket negation was tried first and does not work: Claude Code's matcher reads `[!e]` and `[^e]` as
   literal characters, which left `.env.example` blocked and opened `.env.zz`. Ceiling: an unlisted seven-letter
-  suffix is readable; add it to the list. `new-project.sh` now drops retired kit rules when it merges a
+  suffix is readable; add it to the list. `new-project.sh` drops retired kit rules when it merges a
   project's `settings.json`, because the merge keeps existing rules and the old one would otherwise survive
   every refresh. `tests/test_env_deny_rules.py` covers both.
 - The git safety hook did not follow a directory written the way Git Bash writes it (`/c/Users/x`,
@@ -45,14 +70,39 @@
   `BASH_SOURCE` after changing to `CLAUDE_PROJECT_DIR`; when the two differed (the app moved the
   session, a worktree was removed) every guard hook failed closed on every Bash call with a message
   about Python. It is resolved first now, and the block message names the missing file.
-- **Line endings.** `.gitattributes` (the kit's and the one given to projects) now sets `* text=auto eol=lf`,
-  so a checkout is LF whatever `core.autocrlf` says, and `new-project.sh` strips CR from every text file
-  it copies, from the kit and from a design pack. A CRLF checkout used to make every copied `.md`,
-  `.json` and `.py` show as modified in an LF project until `git add` renormalised it.
+
+### Added
+- `.github/workflows/test.yml`: the kit's first CI. On every pull request and push to `main` it runs
+  `bash -n` over every shell script, compiles `kit.py`, and runs the tests on Linux, macOS and
+  Windows (Git Bash), because the hooks run on all three and had only ever been run on one.
+- The kit's first tests, standard library only (`python -m unittest discover -s tests -v`):
+  `test_block_dangerous_git.py` (the three defects in #5, the bypass above, and every block that must not
+  loosen), `test_env_deny_rules.py`, and `test_new_project.py` (every fix in this release's script section).
+
+## [0.3.0] - 2026-09-16
+
+### Added
+- "Before you write" ladder in `engineering-principles.md`: does it need to exist, does it already exist here, stdlib, native platform, installed dependency, then the minimum. Explicitly never removes boundary validation, data-loss handling, security, accessibility, tests, or requested behaviour. Bug fixes now start by grepping every caller and fixing the shared code once.
+- `defer: <ceiling>, <upgrade path>` comment convention for deliberate shortcuts. `/definition-of-done` check 11 lists every marker in the diff and fails on a marker missing either half; code-reviewer checks the same.
+- `/simplify-review` skill: over-engineering-only review of the diff, a path, or the repo, with `delete:`, `stdlib:`, `native:`, `yagni:`, `shrink:` tags and a net line count. Applies nothing.
+- code-reviewer step 5 produces the same delete list, reported in a new "Delete list" section.
+- `.claude-plugin/` (plugin.json, hooks.json, marketplace.json) so the agents, skills, and hooks can be installed with `/plugin`. Rules, permissions, design tokens, kit.json, and profiles are not plugin-shippable and still come from `new-project.sh`. `lib.sh` now finds `kit.py` next to itself instead of under the project's `.claude/hooks`, so the guard hooks work from a plugin root too.
+- `scripts/measure-rule.sh`: clones a project per run, runs `claude -p` headless with `--setting-sources project` so no user-level plugins leak in, and compares added lines, cost, turns, and time between the current kit and a candidate overlay (or bare Claude Code when no overlay is given).
+
+### Fixed
+- `new-project.sh` wrote `settings.json` and `kit.json` with CRLF on Windows (#3); both now pass `newline="\n"`.
 - `new-project.sh` corrupted project names containing `&` (`sed` expands an unescaped `&` to the matched text) and passed the profile through unchecked. The name is escaped for `&`, `/`, and `\`, names with a newline are rejected up front, and the profile is checked against the fixed list `typescript | python | scripts`.
 
 ### Changed
 - `engineering-principles.md` says the I/O edge interfaces are the one place a single-implementation interface is expected, and adds "no unrequested abstractions elsewhere". Ideas adapted from Ponytail (MIT), see README "Related work".
+
+## [0.2.1] - 2026-09-16
+
+### Fixed
+- **Line endings.** `.gitattributes` (the kit's and the one given to projects) now sets `* text=auto eol=lf`,
+  so a checkout is LF whatever `core.autocrlf` says, and `new-project.sh` strips CR from every text file
+  it copies, from the kit and from a design pack. A CRLF checkout used to make every copied `.md`,
+  `.json` and `.py` show as modified in an LF project until `git add` renormalised it.
 
 ## [0.2.0] - 2026-09-16
 
