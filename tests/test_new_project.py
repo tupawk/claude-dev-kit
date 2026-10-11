@@ -36,8 +36,9 @@ class Sandbox:
         self.env = dict(os.environ, XDG_CACHE_HOME=str(self.root / "cache"))
 
     def run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        # check=False: the tests read the exit code, and a refusal is an expected outcome.
         return subprocess.run(
-            [BASH, str(SCRIPT), *args], capture_output=True, text=True, env=self.env, cwd=self.root
+            [BASH, str(SCRIPT), *args], capture_output=True, text=True, env=self.env, cwd=self.root, check=False
         )
 
     def new(self, spec: str, name: str = "proj") -> Path:
