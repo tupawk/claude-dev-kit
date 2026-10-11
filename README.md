@@ -69,7 +69,11 @@ scripts/new-project.sh update ~/code/existing-project
 cd ~/code/existing-project && git diff .claude/ design/ docs/STACK.md
 ```
 
-`update` reads the package list from the project's `.claude/kit.json` and refreshes what the kit owns (`.claude/` agents, skills, rules and hooks; `design/`; `docs/STACK.md`; the PR template). Everything else is the project's.
+`update` reads the package list from the project's `.claude/kit.json` and refreshes what the kit owns: the agents, skills, rules and hooks it installed under `.claude/`, `design/`, `docs/STACK.md` and the PR template. Everything else is the project's.
+
+- **Your own agents, skills, rules and hooks can live beside the kit's.** The kit lists what it installed in `.claude/KIT_FILES` and on the next update removes only those files, so a file the kit stops shipping goes away and yours stay. Don't edit a kit file in place; the next update replaces it.
+- **`settings.json` is merged, not replaced.** Permission lists are unioned, your scalar settings such as `defaultMode` are kept, and your hooks are kept beside the kit's.
+- **Nothing is written until everything checks out.** An unknown profile, a package path that does not exist or an unreachable design pack stops the run with a message and leaves the project as it was.
 
 ## `.claude/kit.json`: the project's kit settings
 
@@ -92,7 +96,7 @@ Created once by the script, then edited by hand. Read by the hooks on every call
 | Key | What it does |
 |---|---|
 | `packages` | One entry per package: its profile and its directory (`.` for the root). The post-edit and stop hooks run each package's tools from there. |
-| `design.pack` | A directory (relative to the project) or a git URL holding the project's brand. See *Design packs*. Empty means the kit's neutral palette. |
+| `design.pack` | A directory (relative to the project) or a git URL (`https://`, `ssh://`, `git@`, `file://`) holding the project's brand. See *Design packs*. Empty means the kit's neutral palette. A git pack is cached per URL under `~/.cache/claude-dev-kit/packs/` and each update takes its default branch as it stands, history rewrites included. Its `design-system.md` becomes a rule Claude follows, so point only at a repo you control. |
 | `design.exempt` | Path globs the hex-colour hook skips: a vendored theme, a third-party stylesheet, a legacy file that is itself a token source. `**` spans directories; a bare directory name means everything under it. Say why in the PR when you add one. |
 | `protected_branches` | Branches the git hook refuses direct commits on. An empty list turns that check off; the kit recommends leaving it on. |
 
@@ -132,8 +136,8 @@ Hooks are deterministic and cannot be talked around. Rules and CLAUDE.md are ins
 ## Changing the standards
 
 1. Edit the file in `core/` or `profiles/<stack>/`.
-2. Add a line to `CHANGELOG.md` here.
-3. Tag a release (`git tag v0.2.0 && git push --tags`). Projects record the tag in `.claude/KIT_VERSION`.
+2. Add a line to `CHANGELOG.md` here, under `[Unreleased]`.
+3. To release, rename `[Unreleased]` to the new version with today's date, add an empty `[Unreleased]` above it, set the same version in `.claude-plugin/plugin.json` (installed plugins update by that number), merge, then tag the merge commit (`git tag v0.3.1 && git push origin v0.3.1`). Projects record the tag in `.claude/KIT_VERSION`.
 4. Run `new-project.sh update` on each project to pull the change.
 
 Before shipping a rule that is meant to change what Claude writes, measure it: `scripts/measure-rule.sh <project> <task.txt> --overlay <dir-with-the-new-rule> --runs 2` clones the project per run, runs `claude -p` with only project settings loaded, and reports added lines, cost, and turns for the current kit versus the candidate. Runs cost money; start with one run on haiku.

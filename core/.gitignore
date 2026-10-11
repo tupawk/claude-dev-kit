@@ -1,7 +1,10 @@
-# Secrets and local config
+# Secrets
 .env
 .env.*
 !.env.example
+
+# --- claude-dev-kit ---
+# Per-person settings and the /tdd full scope marker; both local only.
 .claude/settings.local.json
 .claude/test-scope
 .claude/agent-memory-local/

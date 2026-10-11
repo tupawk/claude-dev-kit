@@ -1,6 +1,6 @@
 {
   "name": "claude-dev-kit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Development standards for Claude Code: six Opus subagents, the plan/TDD/DoD/simplify skills, and the git, secrets, and design-token safety hooks. The stack-agnostic core of claude-dev-kit; rules, permissions, design tokens, kit.json, and stack profiles still come from scripts/new-project.sh.",
   "author": {
     "name": "tupawk",
