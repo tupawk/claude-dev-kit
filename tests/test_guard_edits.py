@@ -91,6 +91,21 @@ class TheSecretsHook(EditHookCase):
                 with self.subTest(path=path):
                     self.assert_blocked({"file_path": path, "content": "X=1"}, "writing to")
 
+    def test_refuses_env_files_spelled_the_way_windows_and_macos_still_open_them(self) -> None:
+        for rel in [".ENV", ".Env.local", ".env ", ".env::$DATA"]:
+            with self.subTest(name=rel):
+                self.assert_blocked({"file_path": self.path(rel), "content": "X=1"}, "writing to")
+
+    def test_finds_credential_names_with_a_prefix(self) -> None:
+        for text in [
+            'DB_PASSWORD = "hunter2hunter2"',
+            'dbPassword: "q8Zr1mPx4LkT9vWe"',
+            'GITHUB_TOKEN="abcdefabcdef1234"',
+            'AUTH0_CLIENT_SECRET: "q8Zr1mPx4LkT9vWe"',
+        ]:
+            with self.subTest(text=text):
+                self.assert_blocked({"file_path": self.path("a.txt"), "content": text}, "hardcoded credential")
+
     def test_lets_env_example_through(self) -> None:
         self.assert_allowed({"file_path": self.path(".env.example"), "content": "X=<placeholder>"})
 
@@ -113,6 +128,7 @@ class TheSecretsHook(EditHookCase):
             'password: "must be at least twelve characters long"',
             'api_key = os.environ["API_KEY"]',
             'token: "${{ secrets.DEPLOY_TOKEN }}"',
+            'tokenizer = "bert-base-uncased-v2"',
         ]:
             with self.subTest(text=text):
                 self.assert_allowed({"file_path": self.path("a.txt"), "content": text})
@@ -152,6 +168,17 @@ class TheColourHook(EditHookCase):
         ]:
             with self.subTest(text=text):
                 self.assert_allowed({"file_path": self.path(path), "content": text})
+
+    def test_a_long_line_is_checked_in_linear_time(self) -> None:
+        # The first rewrite re-scanned the start of the line for every '#': 40,000 dashes and one
+        # #123 took 11 seconds, and a hook that times out lets the write through unchecked.
+        import time
+
+        for text in ["-" * 200_000 + " #123", "x #123 " * 30_000, 'href=#abc ' * 20_000]:
+            with self.subTest(shape=text[:12]):
+                start = time.monotonic()
+                self.run_hook({"file_path": self.path("templates/a.html"), "content": text})
+                self.assertLess(time.monotonic() - start, 8.0)
 
     def test_exempts_only_the_top_level_design_directory(self) -> None:
         self.assert_allowed({"file_path": self.path("design/tokens.css"), "content": f"--x: {HEX};"})

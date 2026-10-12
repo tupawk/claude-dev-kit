@@ -16,8 +16,6 @@ Subcommands (all print to stdout, one value per line):
     protected-branches          the branches commits are refused on
     rel <path>                  path relative to the project root, forward slashes
     tool-input <field>          that field of the hook's tool_input, read from stdin JSON
-    commit-branches             the branch each `git commit` in the hook's command (stdin JSON)
-                                would land on: follows `cd`, `git -C` and an earlier checkout
 
 The three guards read the hook's JSON on stdin and print why the call is blocked, or nothing when
 it is allowed. They exit 3 when the input cannot be read, and the hook then blocks: a guard that
@@ -132,21 +130,27 @@ def design_exempt(cfg: dict, relpath: str) -> bool:
 
 # --- reading a shell command ---------------------------------------------------------------------
 #
-# The git safety hook judges commands, not text. A command is split the way a shell would split
-# it: heredoc bodies dropped (they are data), newlines and `;`, `&&`, `|` ending a command, quotes
-# and backslashes honoured, `( ... )` opening a subshell whose `cd` does not leak out. Shell
-# keywords (`if`, `then`, `do`, `!`), assignments and wrappers (`env`, `nice`, `sudo`, `xargs`) are
-# stepped over to reach the command they run, and `sh -c '...'`, `bash -c "..."` and `eval` are
-# read again from the inside. What cannot be read at all (an unbalanced quote) falls back to the
-# old text patterns, so an unreadable command is judged no more leniently than before.
+# The git safety hook judges commands, not text. A command is read the way a shell reads it, in one
+# linear pass (prepare): comments dropped where a word starts, heredoc bodies dropped (they are data)
+# unless a shell on that line reads them, newlines ending a command, quotes and backslashes honoured.
+# The bodies of `$(...)`, backticks and `<(...)` are collected, inside double quotes too, and read as
+# commands of their own. Then shlex splits the rest into words, `( ... )` opening a subshell whose
+# `cd` does not leak out. Shell keywords (`if`, `then`, `do`, `!`), assignments and wrappers (`env`,
+# `nice`, `sudo`, `xargs`) are stepped over to reach the command they run, and `sh -c '...'`,
+# `bash -c "..."`, `eval`, text piped or fed to a bare shell, and git aliases are read again from the
+# inside. Nesting deeper than MAX_NESTING is refused, not waved through. What cannot be split at all
+# (an unbalanced quote) is judged line by line, and a line that still cannot be split by the old text
+# patterns, so an unreadable command is never judged more leniently than before.
 
 SEPARATOR_CHARS = set(";&|(){}")
 GIT_OPTIONS_WITH_A_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1(?P<rest>[^\n]*)\n.*?^\s*\2\s*$", re.S | re.M)
+HEREDOC_OPEN = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 LOOKS_LIKE_A_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b(?!-)")
+WORD_BREAK = re.compile(r"[\s;&|()]+")
 NEWLINE = "\n"
 BACKSLASH = "\\"
+WORD_START_AFTER = set(" \t\n;&|()")
 GIT_TIMEOUT_SECONDS = 10
 GIT_BASH_DRIVE = re.compile(r"^/(?:cygdrive/)?([A-Za-z])(?:/|$)")
 MAX_NESTING = 4
@@ -170,6 +174,13 @@ GIT_BUILTINS = set(
     "status stripspace submodule switch symbolic-ref tag update-index update-ref var verify-commit "
     "verify-tag version whatchanged worktree write-tree".split()
 )
+# Short options that take a value, by subcommand: in `-Xignore-space-change` the rest of the
+# cluster is the value, so its `i` is not --interactive.
+SHORT_VALUE_OPTIONS = {"push": "o", "rebase": "XsxSC", "clean": "e", "restore": "s", "commit": "mFCcm"}
+
+
+class TooDeep(Exception):
+    """A command nested deeper than MAX_NESTING: refused rather than read partly."""
 
 
 def run_git(directory: str, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -197,52 +208,150 @@ def is_branch(directory: str, name: str) -> bool:
     return False
 
 
-def newlines_end_commands(command: str) -> str:
-    """`command` with each newline outside quotes turned into `;`, and line continuations joined.
-
-    shlex has no notion of a newline ending a command, and a quoted newline (a commit message
-    with a body) has to stay inside its word, so the quoting is walked by hand first.
-    """
-    out: list[str] = []
-    quote = ""
-    i = 0
-    while i < len(command):
-        ch = command[i]
-        nxt = command[i + 1] if i + 1 < len(command) else ""
+def read_substitution(s: str, i: int) -> tuple[str | None, int]:
+    """The body of the `$(...)`, `<(...)`, `>(...)` or backtick substitution opening at `i`, and the
+    index after it; (None, i) when it never closes."""
+    if s[i] == "`":
+        j = i + 1
+        while j < len(s):
+            if s[j] == BACKSLASH:
+                j += 2
+                continue
+            if s[j] == "`":
+                return s[i + 1 : j], j + 1
+            j += 1
+        return None, i
+    j, depth, quote = i + 2, 1, ""
+    while j < len(s):
+        c = s[j]
         if quote:
-            if ch == BACKSLASH and quote == '"' and nxt:
+            if c == BACKSLASH and quote == '"':
+                j += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c in ("'", '"'):
+            quote = c
+        elif c == BACKSLASH:
+            j += 2
+            continue
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return s[i + 2 : j], j + 1
+        j += 1
+    return None, i
+
+
+def read_word(s: str, j: int) -> tuple[str, int]:
+    """The shell word starting at or after `j` (quotes removed), and the index after it."""
+    while j < len(s) and s[j] in " \t":
+        j += 1
+    if j < len(s) and s[j] in ("'", '"'):
+        end = s.find(s[j], j + 1)
+        end = len(s) if end == -1 else end
+        return s[j + 1 : end], end + 1
+    start = j
+    while j < len(s) and not s[j].isspace() and s[j] not in ";&|()":
+        j += 1
+    return s[start:j], j
+
+
+def runs_a_shell(line: str) -> bool:
+    return any(os.path.basename(w.strip("\"'")) in SHELLS for w in WORD_BREAK.split(line))
+
+
+def prepare(command: str) -> tuple[str, list[str]]:
+    """`command` ready for shlex, and the texts it runs as commands of their own (substitutions, and
+    heredoc or here-string bodies a shell reads). Linear in the length of the command."""
+    out: list[str] = []
+    nested: list[str] = []
+    here_strings: list[str] = []  # on the current line; commands only if a shell on the line reads them
+    heredocs: list[str] = []  # delimiters opened on the current line
+    line_start = 0
+    quote = ""
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        nxt = command[i + 1] if i + 1 < n else ""
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "`" or (ch == "$" and nxt == "(") or (not quote and ch in "<>" and nxt == "("):
+            body, end = read_substitution(command, i)
+            if body is not None:
+                nested.append(body)
+                out.append(" ")
+                i = end
+                continue
+        if quote == '"':
+            if ch == BACKSLASH and nxt:
                 out.append(ch + nxt)
                 i += 2
                 continue
-            if ch == quote:
-                quote = ""
-        elif ch in ("'", '"'):
+            quote = "" if ch == '"' else quote
+            out.append(ch)
+            i += 1
+            continue
+        if ch in ("'", '"'):
             quote = ch
         elif ch == BACKSLASH and nxt:
             if nxt != NEWLINE:
                 out.append(ch + nxt)
             i += 2
             continue
+        elif ch == "#" and (i == 0 or command[i - 1] in WORD_START_AFTER):
+            while i < n and command[i] != NEWLINE:  # a comment runs to the end of the line
+                i += 1
+            continue
+        elif command.startswith("<<<", i):
+            word, end = read_word(command, i + 3)
+            here_strings.append(word)
+            out.append(" ")
+            i = end
+            continue
+        elif ch == "<" and nxt == "<":
+            m = HEREDOC_OPEN.match(command, i)
+            if m:
+                heredocs.append(m.group(2))
+                out.append(" ")
+                i = m.end()
+                continue
         elif ch == NEWLINE:
-            ch = " ; "
+            shell = runs_a_shell("".join(out[line_start:]))
+            if shell:
+                nested.extend(here_strings)
+            out.append(" ; ")
+            i += 1
+            for delimiter in heredocs:  # the bodies follow this line, one after another
+                lines: list[str] = []
+                while i < n:
+                    end = command.find(NEWLINE, i)
+                    end = n if end == -1 else end
+                    line, i = command[i:end], end + 1
+                    if line.strip() == delimiter:
+                        break
+                    lines.append(line)
+                if shell:
+                    nested.append(NEWLINE.join(lines))
+            here_strings, heredocs, line_start = [], [], len(out)
+            continue
         out.append(ch)
         i += 1
-    return "".join(out)
+    if here_strings and runs_a_shell("".join(out[line_start:])):
+        nested.extend(here_strings)
+    return "".join(out), nested
 
 
-def drop_heredoc_bodies(command: str) -> str:
-    """Remove each heredoc's body and terminator, keeping the rest of the line that opened it.
-
-    `cat <<'EOF' | git commit -F -` keeps `cat | git commit -F -`: the body is data, but the line
-    that opened it is still a command.
-    """
-    return HEREDOC.sub(lambda m: m.group("rest"), command)
-
-
-def parse_commands(command: str, scope: tuple[int, ...], ids: list[int]) -> list[tuple[tuple[int, ...], list[str]]]:
-    """The simple commands in `command` with the subshells each runs in. ValueError on bad quoting."""
-    lexer = shlex.shlex(newlines_end_commands(drop_heredoc_bodies(command)), posix=True, punctuation_chars=True)
+def parse_commands(text: str, scope: tuple[int, ...], ids: list[int]) -> list[tuple[tuple[int, ...], list[str]]]:
+    """The simple commands in prepared `text` with the subshells each runs in. ValueError on bad quoting."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""  # prepare() has dropped the real comments; `${#x}` and `a#b` are not ones
     stack = list(scope)
     out: list[tuple[tuple[int, ...], list[str]]] = []
     words: list[str] = []
@@ -262,11 +371,6 @@ def parse_commands(command: str, scope: tuple[int, ...], ids: list[int]) -> list
     if words:
         out.append((tuple(stack), words))
     return out
-
-
-def segments(command: str) -> list[list[str]]:
-    """The simple commands in `command`, each as its words. Raises ValueError on bad quoting."""
-    return [words for _, words in parse_commands(command, (), [0])]
 
 
 def simple_command(words: list[str]) -> list[str]:
@@ -291,42 +395,88 @@ def simple_command(words: list[str]) -> list[str]:
     return words[i:]
 
 
+def shell_script(words: list[str]) -> str | None:
+    """The script a `sh -c '...'` runs, or None when these words are not one."""
+    for k, w in enumerate(words[1:], 1):
+        if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", w):
+            rest = words[k + 1 :]
+            if rest and rest[0] == "--":
+                rest = rest[1:]
+            return rest[0] if rest else None
+    return None
+
+
 def walk(command: str, scope: tuple[int, ...] = (), ids: list[int] | None = None, depth: int = 0) -> Iterator[tuple[tuple[int, ...], list[str]]]:
-    """(subshells, words) for each command `command` runs, reading `sh -c` and `eval` from the inside."""
+    """(subshells, words) for each command `command` runs, reading nested scripts from the inside."""
+    if depth > MAX_NESTING:
+        raise TooDeep
     ids = ids if ids is not None else [0]
-    for where, raw in parse_commands(command, scope, ids):
+    text, nested = prepare(command)
+    for where, raw in parse_commands(text, scope, ids):
         words = simple_command(raw)
         if not words:
             continue
         name = os.path.basename(words[0])
-        if depth < MAX_NESTING and name in SHELLS:
-            flag = next((i for i, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", w)), 0)
-            if flag and flag + 1 < len(words):
-                ids[0] += 1
-                yield from walk(words[flag + 1], where + (ids[0],), ids, depth + 1)
-                continue
-        if depth < MAX_NESTING and name == "eval":
+        script = shell_script(words) if name in SHELLS else None
+        if script is not None:
+            ids[0] += 1
+            yield from walk(script, where + (ids[0],), ids, depth + 1)
+            continue
+        if name == "eval":
             yield from walk(" ".join(words[1:]), where, ids, depth + 1)
             continue
         yield where, words
+    for body in nested:
+        ids[0] += 1
+        yield from walk(body, scope + (ids[0],), ids, depth + 1)
 
 
-def split_args(args: list[str]) -> tuple[set[str], set[str], list[str]]:
-    """Long options, the letters of short options (`-uf` gives u and f) and the positional words."""
+def bare_shell(words: list[str]) -> bool:
+    """A shell with no script: it runs whatever arrives on its standard input."""
+    if os.path.basename(words[0]) not in SHELLS or shell_script(words) is not None:
+        return False
+    skip = False
+    for w in words[1:]:
+        if skip:
+            skip = False
+        elif set(w) <= set("<>&0123456789"):
+            skip = True  # a redirection and its target
+        elif w != "-" and not w.startswith("-"):
+            return False  # a script file
+    return True
+
+
+def split_args(args: list[str], takes_value: str = "") -> tuple[set[str], set[str], list[str]]:
+    """Long options, the letters of short options (`-uf` gives u and f) and the positional words.
+
+    A letter in `takes_value` ends its cluster: the rest, or the next word, is its value.
+    """
     longs: set[str] = set()
     shorts: set[str] = set()
     positional: list[str] = []
-    rest_positional = False
+    rest_positional = skip_value = False
     for a in args:
-        if rest_positional or a == "-" or not a.startswith("-"):
+        if skip_value:
+            skip_value = False
+        elif rest_positional or a == "-" or not a.startswith("-"):
             positional.append(a)
         elif a == "--":
             rest_positional = True
         elif a.startswith("--"):
             longs.add(a.split("=", 1)[0])
         else:
-            shorts.update(a[1:])
+            letters = a[1:]
+            for k, c in enumerate(letters):
+                shorts.add(c)
+                if c in takes_value:
+                    skip_value = k == len(letters) - 1
+                    break
     return longs, shorts, positional
+
+
+def has_long(longs: set[str], name: str) -> bool:
+    """Whether `name` was given: git takes any unambiguous prefix of a long option (`--har`)."""
+    return any(g == name or (len(g) >= 5 and name.startswith(g)) for g in longs)
 
 
 def switched_to(args: list[str], directory: str) -> str | None:
@@ -368,24 +518,30 @@ def scoped(values: dict[tuple[int, ...], str | None], scope: tuple[int, ...]) ->
     return None
 
 
-def git_target(here: str | None, args: list[str], project: str) -> tuple[str | None, list[str]]:
-    """The directory a git invocation works in and its words from the subcommand on."""
+def git_target(here: str | None, args: list[str], project: str, aliases: dict[str, str]) -> tuple[str | None, list[str]]:
+    """The directory a git invocation works in and its words from the subcommand on. An alias set with
+    `-c alias.x=...` is added to `aliases`."""
     directory, rest = here, args
     while rest and rest[0].startswith("-"):
         option, rest = rest[0], rest[1:]
         if option == "-C" and rest:
             directory = resolve_dir(directory or project, rest[0])
+        if option == "-c" and rest and rest[0].startswith("alias.") and "=" in rest[0]:
+            name, value = rest[0][len("alias."):].split("=", 1)
+            aliases[name] = value
         if option in GIT_OPTIONS_WITH_A_VALUE and rest:
             rest = rest[1:]
     return directory, rest
 
 
-def expand_alias(directory: str, rest: list[str]) -> list[str]:
+def expand_alias(directory: str, rest: list[str], aliases: dict[str, str]) -> list[str]:
     """`rest` with a git alias in front replaced by what it stands for; a shell alias becomes ["!", text]."""
     if not rest or rest[0] in GIT_BUILTINS:
         return rest
-    out = run_git(directory, "config", "--get", f"alias.{rest[0]}")
-    value = out.stdout.strip() if out is not None and out.returncode == 0 else ""
+    value = aliases.get(rest[0], "")
+    if not value:
+        out = run_git(directory, "config", "--get", f"alias.{rest[0]}")
+        value = out.stdout.strip() if out is not None and out.returncode == 0 else ""
     if not value:
         return rest
     if value.startswith("!"):
@@ -399,6 +555,7 @@ def expand_alias(directory: str, rest: list[str]) -> list[str]:
 DISCARD_ALL = {".", "./", ":/", ":/*", "*"}
 ROOT_TARGETS = {"/", "~", "$HOME", "${HOME}", "..", ".", "/*", "~/*", "$HOME/*", "${HOME}/*", "../*"}
 DRIVE_ROOT = re.compile(r"[A-Za-z]:[\\/]?|/[A-Za-z]|/cygdrive/[A-Za-z]")
+FORCE_OPTIONS = ("--force", "--force-with-lease", "--force-if-includes", "--mirror")
 
 
 def protected_ref(word: str, protected: list[str]) -> str:
@@ -409,45 +566,45 @@ def protected_ref(word: str, protected: list[str]) -> str:
 
 def git_danger(sub: str, args: list[str], protected: list[str]) -> str:
     """Why this git subcommand is refused, or ""."""
-    longs, shorts, positional = split_args(args)
+    longs, shorts, positional = split_args(args, SHORT_VALUE_OPTIONS.get(sub, ""))
     if sub == "push":
-        if longs & {"--force", "--force-with-lease", "--force-if-includes"} or "f" in shorts:
+        if any(has_long(longs, o) for o in FORCE_OPTIONS) or "f" in shorts:
             return "force push"
         if any(p.startswith("+") for p in positional):
             return "force push"
-        deleting = "--delete" in longs or "d" in shorts
-        for p in positional[1:] if positional else []:
+        deleting = has_long(longs, "--delete") or "d" in shorts
+        for p in positional[1:]:
             target = protected_ref(p[1:], protected) if p.startswith(":") else (protected_ref(p, protected) if deleting else "")
             if target:
                 return f"deleting {target}"
     elif sub == "branch":
-        if "--delete" in longs or shorts & {"d", "D"}:
+        if has_long(longs, "--delete") or shorts & {"d", "D"}:
             for p in positional:
                 if protected_ref(p, protected):
                     return f"deleting {protected_ref(p, protected)}"
     elif sub == "reset":
-        if "--hard" in longs:
+        if has_long(longs, "--hard"):
             return "git reset --hard"
     elif sub == "checkout":
         if any(p in DISCARD_ALL for p in positional):
             return "discarding all working changes"
     elif sub == "restore":
-        staged_only = ("--staged" in longs or "S" in shorts) and not ("--worktree" in longs or "W" in shorts)
+        staged_only = (has_long(longs, "--staged") or "S" in shorts) and not (has_long(longs, "--worktree") or "W" in shorts)
         if not staged_only and any(p in DISCARD_ALL for p in positional):
             return "discarding all working changes"
     elif sub == "clean":
-        dry_run = "--dry-run" in longs or "n" in shorts
-        if ("--force" in longs or "f" in shorts) and not dry_run:
+        dry_run = has_long(longs, "--dry-run") or "n" in shorts
+        if (has_long(longs, "--force") or "f" in shorts) and not dry_run:
             return "git clean -f"
     elif sub == "rebase":
-        if "--interactive" in longs or "i" in shorts:
+        if has_long(longs, "--interactive") or "i" in shorts:
             return "interactive rebase (do it manually if needed)"
     return ""
 
 
 def rm_danger(args: list[str]) -> str:
     longs, shorts, positional = split_args(args)
-    if not ("--recursive" in longs or shorts & {"r", "R"}):
+    if not (has_long(longs, "--recursive") or shorts & {"r", "R"}):
         return ""
     for target in positional:
         bare = target.rstrip("/") or "/"
@@ -458,7 +615,7 @@ def rm_danger(args: list[str]) -> str:
 
 LEGACY_PATTERNS = [
     (re.compile(r"git\s+push\b.*\s(--force\S*|-f\b|\+\S+)"), "force push"),
-    (re.compile(r"git\s+reset\s+--hard"), "git reset --hard"),
+    (re.compile(r"git\s+reset\s+.*--hard"), "git reset --hard"),
     (re.compile(r"git\s+checkout\s+--\s+\."), "discarding all working changes"),
     (re.compile(r"git\s+clean\s+-[a-zA-Z]*f"), "git clean -f"),
     (re.compile(r"git\s+rebase\s+.*(\s-i\b|--interactive)"), "interactive rebase (do it manually if needed)"),
@@ -466,23 +623,59 @@ LEGACY_PATTERNS = [
 ]
 
 
+def unreadable(command: str, project: str, protected: list[str], depth: int) -> str:
+    """Judge a command shlex cannot split. Bash still runs the lines before a broken quote, so each
+    line is judged on its own; a line that cannot be split either meets the old text patterns."""
+    if NEWLINE in command and depth < MAX_NESTING:
+        for line in command.split(NEWLINE):
+            reason = check_bash(line, project, protected, depth + 1)
+            if reason:
+                return reason
+        return ""
+    for pattern, reason in LEGACY_PATTERNS:
+        if pattern.search(command):
+            return reason
+    names = "|".join(re.escape(b) for b in protected)
+    if names:
+        for deleting in (
+            rf"git\s+(?:branch|push)\b[^\n;&|]*\s(?:-[a-zA-Z]*[dD][a-zA-Z]*|--delete)\b[^\n;&|]*?\s(?:refs/heads/)?({names})(?![\w./-])",
+            rf"git\s+push\b[^\n;&|]*\s:(?:refs/heads/)?({names})(?![\w./-])",
+        ):
+            m = re.search(deleting, command)
+            if m:
+                return f"deleting {m.group(1)}"
+    branch = head_branch(project) if LOOKS_LIKE_A_COMMIT.search(command) else ""
+    return f"committing directly to {branch}. Create a feature branch first" if branch in protected else ""
+
+
 def check_bash(command: str, project: str, protected: list[str], depth: int = 0) -> str:
     """Why `command` is refused, or "". Commits are judged on the branch they will land on."""
     try:
-        commands = list(walk(command))
+        commands = list(walk(command, depth=depth))
+        if any(bare_shell(words) for _, words in commands):
+            # Text piped or fed to a bare shell is a script: read every multi-word argument as one.
+            fed = [w for _, ws in commands if not bare_shell(ws) for w in ws[1:] if any(c.isspace() for c in w)]
+            for text in fed:
+                commands.extend(walk(text, (-1,), depth=depth + 1))
+    except TooDeep:
+        return "command nested too deeply to check; run it in plain steps"
     except ValueError:
-        for pattern, reason in LEGACY_PATTERNS:
-            if pattern.search(command):
-                return reason
-        branch = head_branch(project) if LOOKS_LIKE_A_COMMIT.search(command) else ""
-        return f"committing directly to {branch}. Create a feature branch first" if branch in protected else ""
+        return unreadable(command, project, protected, depth)
     heres: dict[tuple[int, ...], str | None] = {(): project}
+    pushed: dict[tuple[int, ...], list[str | None]] = {}
     moved: dict[str, str] = {}  # repository directory -> branch an earlier checkout put it on
+    aliases: dict[str, str] = {}  # set earlier in this same command
     for scope, words in commands:
         here = scoped(heres, scope)
         name = os.path.basename(words[0])
         if name in ("cd", "pushd"):
+            if name == "pushd":
+                pushed.setdefault(scope, []).append(here)
             heres[scope] = resolve_dir(here or project, words[1]) if len(words) > 1 else None
+            continue
+        if name == "popd":
+            stack = pushed.get(scope)
+            heres[scope] = stack.pop() if stack else None
             continue
         if name == "rm":
             reason = rm_danger(words[1:])
@@ -491,12 +684,14 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
             continue
         if name not in ("git", "git.exe"):
             continue
-        directory, rest = git_target(here, words[1:], project)
+        directory, rest = git_target(here, words[1:], project, aliases)
         where = directory or project  # a target this cannot follow: judge the project, as before
-        rest = expand_alias(where, rest)
+        rest = expand_alias(where, rest, aliases)
         if not rest:
             continue
-        if rest[0] == "!" and len(rest) > 1 and depth < MAX_NESTING:
+        if rest[0] == "!" and len(rest) > 1:
+            if depth >= MAX_NESTING:
+                return "command nested too deeply to check; run it in plain steps"
             reason = check_bash(rest[1], where, protected, depth + 1)
             if reason:
                 return reason
@@ -505,7 +700,11 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
         reason = git_danger(sub, args, protected)
         if reason:
             return reason
-        if sub in ("checkout", "switch"):
+        if sub == "config":
+            _, _, positional = split_args(args)
+            if len(positional) >= 2 and positional[0].startswith("alias."):
+                aliases[positional[0][len("alias."):]] = positional[1]
+        elif sub in ("checkout", "switch"):
             switched = switched_to(args, where)
             if switched is None:
                 moved.pop(where, None)
@@ -516,38 +715,6 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
             if branch in protected:
                 return f"committing directly to {branch}. Create a feature branch first"
     return ""
-
-
-def commit_branches(command: str, project: str) -> list[str]:
-    """The branch each `git commit` in `command` would land on, in order."""
-    found: list[str] = []
-    try:
-        commands = list(walk(command))
-    except ValueError:
-        return [head_branch(project)] if LOOKS_LIKE_A_COMMIT.search(command) else []
-    heres: dict[tuple[int, ...], str | None] = {(): project}
-    moved: dict[str, str] = {}
-    for scope, words in commands:
-        here = scoped(heres, scope)
-        if words[0] in ("cd", "pushd"):
-            heres[scope] = resolve_dir(here or project, words[1]) if len(words) > 1 else None
-            continue
-        if os.path.basename(words[0]) not in ("git", "git.exe"):
-            continue
-        directory, rest = git_target(here, words[1:], project)
-        where = directory or project
-        rest = expand_alias(where, rest)
-        if not rest:
-            continue
-        if rest[0] in ("checkout", "switch"):
-            switched = switched_to(rest[1:], where)
-            if switched is None:
-                moved.pop(where, None)
-            elif switched:
-                moved[where] = switched
-        elif rest[0] == "commit":
-            found.append(moved.get(where) or head_branch(where))
-    return found
 
 
 # --- what an edit writes -------------------------------------------------------------------------
@@ -587,8 +754,9 @@ SECRET_PATTERNS = [
 ]
 # A credential-named key assigned a quoted value of 12+ characters with no spaces (prose has spaces)
 # and no $, < or { (templates and placeholders). JSON's quoted key is allowed before the colon.
+# No word boundary in front: DB_PASSWORD, dbPassword and AUTH0_CLIENT_SECRET are credential names too.
 CREDENTIAL = re.compile(
-    r"""\b(password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|auth[_-]?token|token)["']?"""
+    r"""(password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|auth[_-]?token|token)["']?"""
     r"""\s*[:=]\s*(["'])([^"'\s$<{]{12,})\2""",
     re.I,
 )
@@ -596,7 +764,9 @@ PLACEHOLDER = re.compile(r"example|placeholder|changeme|change[_-]me|your[_-]|du
 
 
 def env_file(path: str) -> bool:
-    name = path.replace(BACKSLASH, "/").rsplit("/", 1)[-1]
+    """Whether a write to `path` writes an env file. Names are compared as Windows and macOS open
+    them: case-insensitively, and on Windows without trailing spaces or dots or an `::$DATA` stream."""
+    name = path.replace(BACKSLASH, "/").rsplit("/", 1)[-1].split(":", 1)[0].rstrip(" .").lower()
     return name != ".env.example" and (name == ".env" or name.startswith(".env.") or name.endswith(".env"))
 
 
@@ -616,27 +786,42 @@ def check_secrets(tool_input: dict) -> str:
 
 
 HEX_COLOUR = re.compile(r"(?<![\w&])#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])")
-URL_ATTRIBUTE = re.compile(r"""(?:href|src|action|xlink:href)\s*=\s*["']?\s*$""", re.I)
-CSS_VALUE = re.compile(r"[A-Za-z-]+\s*:\s*[^;{}]*$")
+URL_ATTRIBUTES = ("href", "src", "action")
 COMMENT_START = ("//", "/*", "*", "<!--", "#")
+CONTEXT_WINDOW = 200  # how far back from a match its context is read; keeps a long line linear
 COLOUR_CONTEXT = set(":,(=\"'")
 COLOUR_SCOPE_EXT = (".css", ".scss", ".tsx", ".jsx", ".vue", ".svelte", ".html")
 COLOUR_SCOPE_DIRS = ("src/components/", "src/app/", "src/pages/", "src/ui/", "templates/")
 MAX_HITS_SHOWN = 6
 
 
-def is_colour(line: str, m: re.Match[str]) -> bool:
+def after_url_attribute(before: str) -> bool:
+    """Whether `before` ends inside `href="`, `src=` or `action='`: what follows is an anchor."""
+    head = before.rstrip().rstrip("\"'").rstrip()
+    return head.endswith("=") and head[:-1].rstrip().lower().endswith(URL_ATTRIBUTES)
+
+
+def in_css_value(before: str) -> bool:
+    """Whether `before` ends inside a CSS declaration's value (`border: 1px solid `)."""
+    declaration = max(before.rfind(";"), before.rfind("{"), before.rfind("}"))
+    head, colon, _ = before[declaration + 1 :].rpartition(":")
+    name = head.rstrip()
+    return bool(colon) and bool(name) and (name[-1].isalpha() or name[-1] == "-")
+
+
+def is_colour(line: str, m: re.Match[str], comment: bool) -> bool:
     """Whether a `#xxx` match is a colour. An anchor (`href="#add"`) is not; an all-digit short one
-    (`#123`, `#1001`) is an issue or order number unless it sits where a CSS value goes."""
-    before = line[: m.start()]
-    if URL_ATTRIBUTE.search(before):
+    (`#123`, `#1001`) is an issue or order number unless it sits where a CSS value goes. Only the
+    CONTEXT_WINDOW characters before the match are read, so a long line stays linear."""
+    before = line[max(0, m.start() - CONTEXT_WINDOW) : m.start()]
+    if after_url_attribute(before):
         return False
     digits = m.group(1)
     if len(digits) > 4 or not digits.isdigit():
         return True
     if before.rstrip()[-1:] in COLOUR_CONTEXT:
         return True
-    return bool(CSS_VALUE.search(before)) and not before.lstrip().startswith(COMMENT_START)
+    return in_css_value(before) and not comment
 
 
 def colour_in_scope(cfg: dict, relpath: str) -> bool:
@@ -659,7 +844,10 @@ def check_colours(tool_input: dict, cfg: dict) -> str:
     hits: list[str] = []
     for text in written_text(tool_input):
         for n, line in enumerate(text.splitlines(), 1):
-            if "brand-exception:" not in line and any(is_colour(line, m) for m in HEX_COLOUR.finditer(line)):
+            if "brand-exception:" in line:
+                continue
+            comment = line.lstrip().startswith(COMMENT_START)
+            if any(is_colour(line, m, comment) for m in HEX_COLOUR.finditer(line)):
                 hits.append(f"  line {n}: {line.strip()[:110]}")
     if not hits:
         return ""
@@ -707,10 +895,6 @@ def main(argv: list[str]) -> int:
             print(b)
     elif cmd == "rel":
         print(rel(args[0]))
-    elif cmd == "commit-branches":
-        command = read_tool_input().get("command") or ""
-        for branch in commit_branches(command, os.getcwd()):
-            print(branch)
     elif cmd == "tool-input":
         data = json.load(sys.stdin)
         value = data.get("tool_input", {}).get(args[0], "")

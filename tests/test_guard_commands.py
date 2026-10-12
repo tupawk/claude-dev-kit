@@ -45,6 +45,86 @@ class DestructiveSpellingsAreBlocked(HookCase):
                 self.assert_blocked(self.run_hook(command, cwd=project), saying)
 
 
+class WhatTheShellRunsIsRead(HookCase):
+    """Found by the adversarial review of the rewrite: forms the first parser did not read as commands."""
+
+    def test_comments_hide_nothing_after_them(self) -> None:
+        project = self.project("feat/x")
+        for command, saying in [
+            ("# push the branch\ngit push --force", "force push"),
+            ("ls\n# now force\ngit push -f origin feat/x", "force push"),
+            ("echo ${#x}; git reset --hard", "git reset --hard"),
+            ("n=$#; git reset --hard", "git reset --hard"),
+            ("curl https://x.test/a#frag && git push --force", "force push"),
+        ]:
+            with self.subTest(command=command):
+                self.assert_blocked(self.run_hook(command, cwd=project), saying)
+
+    def test_a_commit_after_a_comment_is_judged(self) -> None:
+        project = self.project("main")
+        self.assert_blocked(self.run_hook("git status # check\ngit commit -m x", cwd=project), "committing directly to main")
+
+    def test_substitutions_and_text_fed_to_a_shell_are_read(self) -> None:
+        project = self.project("feat/x")
+        for command, saying in [
+            ("echo `git push --force`", "force push"),
+            ("diff <(git show HEAD:a) <(git reset --hard)", "git reset --hard"),
+            ('echo "$(git reset --hard)"', "git reset --hard"),
+            ('echo "git push --force" | sh', "force push"),
+            ('bash <<<"git push --force"', "force push"),
+            ("sh <<'EOF'\ngit push --force\nEOF", "force push"),
+            ('echo "x <<EOF"\ngit reset --hard\nEOF', "git reset --hard"),
+            ('cat <<< "a"\ngit push --force\na', "force push"),
+        ]:
+            with self.subTest(command=command):
+                self.assert_blocked(self.run_hook(command, cwd=project), saying)
+
+    def test_an_unreadable_command_still_has_its_deletes_checked(self) -> None:
+        project = self.project("feat/x")
+        for command in [
+            'git push origin --delete main\necho "unterminated',
+            "git branch -D main\necho 'x",
+            "echo $'it\\'s'; git branch -D main",
+        ]:
+            with self.subTest(command=command):
+                self.assert_blocked(self.run_hook(command, cwd=project), "deleting main")
+
+    def test_nesting_too_deep_to_follow_is_refused(self) -> None:
+        project = self.project("feat/x")
+        for command in ["eval eval eval eval eval git push --force", "bash -c -- 'git reset --hard'"]:
+            with self.subTest(command=command):
+                result = self.run_hook(command, cwd=project)
+                self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_abbreviated_long_options_count(self) -> None:
+        project = self.project("feat/x")
+        for command, saying in [
+            ("git reset --har", "git reset --hard"),
+            ("git branch --del main", "deleting main"),
+            ("git push --del origin main", "deleting main"),
+            ("git clean --forc", "git clean -f"),
+            ("git push --force-w origin feat/x", "force push"),
+            ("git rebase --interac main", "interactive rebase"),
+            ("git push --mirror backup", "force push"),
+        ]:
+            with self.subTest(command=command):
+                self.assert_blocked(self.run_hook(command, cwd=project), saying)
+
+    def test_an_alias_defined_in_the_same_command_is_read(self) -> None:
+        project = self.project("feat/x")
+        for command in ["git -c alias.zz='push --force' zz", "git config alias.yy 'push --force' && git yy"]:
+            with self.subTest(command=command):
+                self.assert_blocked(self.run_hook(command, cwd=project), "force push")
+
+    def test_popd_returns_to_the_project(self) -> None:
+        project = self.project("main")
+        sibling = make_repo(self.tmp / "pack", "feat/y")
+        self.assert_blocked(
+            self.run_hook(f"pushd {posix(sibling)} && popd && git commit -am x", cwd=project),
+            "committing directly to main",
+        )
+
+
 class MentionsAreNotCommands(HookCase):
     def test_each_harmless_command_passes(self) -> None:
         project = self.project("feat/x")
@@ -60,6 +140,12 @@ class MentionsAreNotCommands(HookCase):
             "rm -rf ./build",
             "rm -rf ../sibling/build",
             'echo "café → 🎉"',
+            "echo 'a # b'; git status",
+            "git rebase -Xignore-space-change main",
+            "git push -oforce=1 origin feat/x",
+            "git push -o ci.skip origin feat/x",
+            "gh pr create --title t --body \"$(cat <<'EOF'\nnever git push --force or git reset --hard\nEOF\n)\"",
+            "git commit -m \"$(cat <<'EOF'\ndocs: never run git push --force\nEOF\n)\"",
         ]:
             with self.subTest(command=command):
                 self.assert_allowed(self.run_hook(command, cwd=project))
