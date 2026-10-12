@@ -5,6 +5,47 @@ Each release lists what changed since the one before. Work merged after the late
 
 ## [Unreleased]
 
+The guard hooks rebuilt from the 2026-10-11 review: they read commands and edits the way the shell and
+the tools do, instead of matching raw text. Covered by `tests/test_guard_commands.py` and
+`tests/test_guard_edits.py`.
+
+### Fixed
+- **The git safety hook read text, not commands.** Every decision now lives in `kit.py guard-bash`, which
+  splits a command into shell words (heredoc bodies dropped, quotes honoured, subshells tracked) and steps
+  over keywords, assignments and wrappers (`if`/`then`/`do`/`!`, `env`, `nice`, `sudo`, `xargs`), reading
+  `sh -c`, `bash -c` and `eval` from the inside. It now blocks spellings that used to pass: `git push -uf`,
+  `git push origin +branch`, `--force-with-lease`, `git push origin :main` and `-d main`, `git branch -D master`
+  (deletes honour `protected_branches`), `git -c x=y reset --hard`, `git reset -q --hard`, `git checkout .`,
+  `git restore .`, `git clean -d -f` and `--force`, `git rebase -ir`, `rm -rf ~/`, `rm -rf $HOME/`, `rm -rf ../`,
+  `rm -r -f ~`. A commit on a protected branch is found in a heredoc's opening line, a loop, an `if`, behind
+  `!`, `env` or `nice`, inside `sh -c` or `eval`, through a git alias, and after `git switch -`; a `cd` inside
+  `( ... )` no longer leaks out. Words that only mention a command pass: a branch named `feat/seat-inventory`,
+  `git checkout -- ./one/file`, deleting `main-backup`, a `grep` or `echo` of "git reset --hard", a heredoc body,
+  `git restore --staged .`, `git clean -n -f`. A command that cannot be split (an unbalanced quote) is judged by
+  the old text patterns, never more leniently. Deliberately not blocked: `git pull` and `git merge` on a
+  protected branch, which are how a local `main` is kept current.
+- **The secrets and design-token hooks read only `content` and `new_string`, and only for Edit and Write.**
+  Both now read every string an edit writes (`edits[].new_string`, a notebook's `new_source`, any new field)
+  except the text being replaced, so removing a leaked key is still possible, and both are wired to
+  `Edit|Write|MultiEdit|NotebookEdit` in `settings.json` and the plugin's `hooks.json`.
+- **The secrets hook** caught `.env.local` only when the path used forward slashes; any spelling is caught now,
+  as is `prod.env`. New patterns: Stripe live keys, `github_pat_` tokens, Google API keys, encrypted and DSA
+  private keys, and a JSON `"api_key": "..."` assignment. Fewer false alarms: an `sk-` key must contain a digit
+  and not follow a letter (a CSS class `task-management-dashboard` passed as a key before), and an assignment's
+  value must have no spaces and not look like a placeholder.
+- **The design-token hook** blocked `// issue #123`, `Order #1001` and `href="#add"`. An anchor is never a
+  colour, and an all-digit three- or four-character `#123` counts only where a CSS value goes (`color: #333`,
+  `border: 1px solid #333` are still caught). Only the top-level `design/` is exempt now, not a `design/` folder
+  anywhere (`src/components/design/Button.css` was escaping the check), and a `design.exempt` entry with a dot
+  in a directory name (`theme.v1`) exempts what is under it.
+- **Non-ASCII payloads.** `kit.py` reads and writes UTF-8 whatever the Windows code page is; an `echo` with an
+  accent or an emoji used to fail the git hook closed.
+
+### Changed
+- The three guard scripts are thin: each sources `lib.sh`, calls one `kit.py` subcommand and still blocks when
+  Python, `kit.py` or the input is missing. One Python process per call instead of several; on the Windows
+  machine the kit is developed on, the git hook went from about 0.9 s to 0.45 s per Bash call.
+
 ## [0.3.1] - 2026-10-11
 
 Fixes from the 2026-10-11 review of `new-project.sh`, each reproduced on a throwaway project first and
