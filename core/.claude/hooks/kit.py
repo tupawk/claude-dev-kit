@@ -131,37 +131,54 @@ def design_exempt(cfg: dict, relpath: str) -> bool:
 # --- reading a shell command ---------------------------------------------------------------------
 #
 # The git safety hook judges commands, not text. A command is read the way a shell reads it, in one
-# linear pass (prepare): comments dropped where a word starts, heredoc bodies dropped (they are data)
-# unless a shell on that line reads them, newlines ending a command, quotes and backslashes honoured.
-# The bodies of `$(...)`, backticks and `<(...)` are collected, inside double quotes too, and read as
-# commands of their own. Then shlex splits the rest into words, `( ... )` opening a subshell whose
-# `cd` does not leak out. Shell keywords (`if`, `then`, `do`, `!`), assignments and wrappers (`env`,
-# `nice`, `sudo`, `xargs`) are stepped over to reach the command they run, and `sh -c '...'`,
-# `bash -c "..."`, `eval`, text piped or fed to a bare shell, and git aliases are read again from the
-# inside. Nesting deeper than MAX_NESTING is refused, not waved through. What cannot be split at all
-# (an unbalanced quote) is judged line by line, and a line that still cannot be split by the old text
-# patterns, so an unreadable command is never judged more leniently than before.
+# linear pass (prepare): a comment only where a word starts, quotes, escapes and ANSI-C `$'...'`
+# honoured, newlines ending a command, `((...))` arithmetic left alone. Heredoc and here-string bodies
+# are data: they are read as commands only when a bare shell in the command reads its standard input
+# (`| bash`, `sh <<EOF`, `. /dev/stdin`), but the substitutions inside an unquoted heredoc run and are
+# read. The body of each `$(...)`, backtick and `<(...)`, inside double quotes too, is found with the
+# same reader (so a heredoc or a `)` inside one does not end it early) and read as commands of its own;
+# where its output becomes code (`eval`, `bash -c`, `source <(...)`), what it emits is read as commands
+# too. Then shlex splits the rest into words, `( ... )` opening a subshell whose `cd` does not leak out.
+# Shell keywords, assignments and wrappers (`env`, `nice`, `sudo`, `xargs`, `stdbuf`, `winpty`) are
+# stepped over to reach the command they run, and `sh -c`, `eval`, `find -exec`, `git submodule foreach`,
+# `git rebase -x`, interpreter one-liners and git aliases are read from the inside.
+#
+# Where the reader cannot be sure, it refuses rather than guesses: nesting past MAX_NESTING, a command
+# longer than MAX_TEXT once heredoc bodies are dropped, more than MAX_GIT_CALLS git look-ups, and a line
+# that cannot be split at all and mentions a dangerous git or rm command. Nothing is judged more
+# leniently than the old text patterns judged it.
 
 SEPARATOR_CHARS = set(";&|(){}")
+OPERATOR_CHARS = set(" \t\r\n;&|()<>")
 GIT_OPTIONS_WITH_A_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
-HEREDOC_OPEN = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 LOOKS_LIKE_A_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b(?!-)")
-WORD_BREAK = re.compile(r"[\s;&|()]+")
+MARK = "\x01"  # brackets the index of a substitution in prepared text: \x01<n>\x01
+MARKS = re.compile("\x01(\\d+)\x01")
 NEWLINE = "\n"
 BACKSLASH = "\\"
-WORD_START_AFTER = set(" \t\n;&|()")
 GIT_TIMEOUT_SECONDS = 10
 GIT_BASH_DRIVE = re.compile(r"^/(?:cygdrive/)?([A-Za-z])(?:/|$)")
 MAX_NESTING = 4
+MAX_READER_DEPTH = 32  # substitutions inside substitutions
+MAX_SUBSHELLS = 64
+MAX_TEXT = 100_000
+MAX_GIT_CALLS = 40
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
-LEADING_KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "time"}
+STDIN_SCRIPTS = {"/dev/stdin", "-", "/proc/self/fd/0"}
+SHELL_OPTIONS_WITH_A_VALUE = {"-o", "-O", "+o", "+O", "--rcfile", "--init-file"}
+LEADING_KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc"}
 # A wrapper runs the command after it; the set is its options that take a separate value.
 WRAPPERS: dict[str, set[str]] = {
     "command": set(), "exec": set(), "nohup": set(), "time": set(), "timeout": {"-s", "-k"},
-    "nice": {"-n"}, "env": {"-u", "-C", "-S"}, "sudo": {"-u", "-g", "-h", "-p", "-C"},
-    "xargs": {"-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a"},
+    "nice": {"-n"}, "ionice": {"-c", "-n", "-p"}, "env": {"-u", "-C", "-S"},
+    "sudo": {"-u", "-g", "-h", "-p", "-C"}, "doas": {"-u", "-C"},
+    "xargs": {"-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a"}, "stdbuf": {"-i", "-o", "-e"},
+    "winpty": set(), "setsid": set(), "unbuffer": set(), "chronic": set(),
 }
+# Interpreters whose one-liner is code this cannot read: it is held to the old text patterns.
+INTERPRETER = re.compile(r"^(?:python[\d.]*|py|node|perl|ruby|php)(?:\.exe)?$")
+INTERPRETER_CODE_FLAGS = {"-c", "-e", "-E", "-r", "-p", "--eval", "--print"}
 GIT_BUILTINS = set(
     "add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore "
     "check-ref-format checkout cherry cherry-pick citool clean clone column commit commit-graph "
@@ -177,20 +194,41 @@ GIT_BUILTINS = set(
 # Short options that take a value, by subcommand: in `-Xignore-space-change` the rest of the
 # cluster is the value, so its `i` is not --interactive.
 SHORT_VALUE_OPTIONS = {"push": "o", "rebase": "XsxSC", "clean": "e", "restore": "s", "commit": "mFCcm"}
+ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v", "e": "\x1b",
+                  BACKSLASH: BACKSLASH, "'": "'", '"': '"', "?": "?"}
 
 
 class TooDeep(Exception):
-    """A command nested deeper than MAX_NESTING: refused rather than read partly."""
+    """Nesting this reader will not follow: refused rather than read partly."""
+
+
+class TooLong(Exception):
+    """A command too long to read in the time a hook has."""
+
+
+class TooManyGitCalls(Exception):
+    """More git look-ups than one hook call should make."""
+
+
+_git_calls: dict[tuple[str, tuple[str, ...]], subprocess.CompletedProcess[str] | None] = {}
 
 
 def run_git(directory: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """`git -C directory args`, remembered for the rest of this hook call."""
+    key = (directory, args)
+    if key in _git_calls:
+        return _git_calls[key]
+    if len(_git_calls) >= MAX_GIT_CALLS:
+        raise TooManyGitCalls
     try:
-        return subprocess.run(
+        out: subprocess.CompletedProcess[str] | None = subprocess.run(
             ["git", "-C", directory, *args],
             capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, ValueError, subprocess.SubprocessError):  # ValueError: a NUL in an argument
+        out = None
+    _git_calls[key] = out
+    return out
 
 
 def head_branch(directory: str) -> str:
@@ -208,71 +246,144 @@ def is_branch(directory: str, name: str) -> bool:
     return False
 
 
-def read_substitution(s: str, i: int) -> tuple[str | None, int]:
-    """The body of the `$(...)`, `<(...)`, `>(...)` or backtick substitution opening at `i`, and the
-    index after it; (None, i) when it never closes."""
-    if s[i] == "`":
-        j = i + 1
-        while j < len(s):
-            if s[j] == BACKSLASH:
-                j += 2
-                continue
-            if s[j] == "`":
-                return s[i + 1 : j], j + 1
-            j += 1
-        return None, i
-    j, depth, quote = i + 2, 1, ""
+def ansi_c(s: str, j: int) -> tuple[str, int]:
+    """The text of a `$'...'` string whose body starts at `j`, and the index after it."""
+    out: list[str] = []
     while j < len(s):
         c = s[j]
-        if quote:
-            if c == BACKSLASH and quote == '"':
+        if c == "'":
+            return "".join(out), j + 1
+        if c == BACKSLASH and j + 1 < len(s):
+            e = s[j + 1]
+            if e in ANSI_C_ESCAPES:
+                out.append(ANSI_C_ESCAPES[e])
                 j += 2
-                continue
-            if c == quote:
-                quote = ""
-        elif c in ("'", '"'):
-            quote = c
-        elif c == BACKSLASH:
-            j += 2
+            elif e == "x":
+                digits = re.match(r"[0-9a-fA-F]{1,2}", s[j + 2 :])
+                out.append(chr(int(digits.group(), 16)) if digits else "x")
+                j += 2 + (len(digits.group()) if digits else 0)
+            elif e in "01234567":
+                digits = re.match(r"[0-7]{1,3}", s[j + 1 :])
+                assert digits is not None
+                out.append(chr(int(digits.group(), 8)))
+                j += 1 + len(digits.group())
+            else:
+                out.append(c + e)
+                j += 2
             continue
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return s[i + 2 : j], j + 1
+        out.append(c)
         j += 1
-    return None, i
+    raise ValueError("unclosed $'...'")
 
 
 def read_word(s: str, j: int) -> tuple[str, int]:
-    """The shell word starting at or after `j` (quotes removed), and the index after it."""
+    """The shell word starting at or after `j`, with its quotes and escapes resolved, and the index
+    after it. Used for here-string words and heredoc delimiters."""
     while j < len(s) and s[j] in " \t":
         j += 1
-    if j < len(s) and s[j] in ("'", '"'):
-        end = s.find(s[j], j + 1)
-        end = len(s) if end == -1 else end
-        return s[j + 1 : end], end + 1
-    start = j
-    while j < len(s) and not s[j].isspace() and s[j] not in ";&|()":
-        j += 1
-    return s[start:j], j
-
-
-def runs_a_shell(line: str) -> bool:
-    return any(os.path.basename(w.strip("\"'")) in SHELLS for w in WORD_BREAK.split(line))
-
-
-def prepare(command: str) -> tuple[str, list[str]]:
-    """`command` ready for shlex, and the texts it runs as commands of their own (substitutions, and
-    heredoc or here-string bodies a shell reads). Linear in the length of the command."""
     out: list[str] = []
-    nested: list[str] = []
-    here_strings: list[str] = []  # on the current line; commands only if a shell on the line reads them
-    heredocs: list[str] = []  # delimiters opened on the current line
-    line_start = 0
+    while j < len(s) and s[j] not in OPERATOR_CHARS:
+        c = s[j]
+        if c == "'":
+            end = s.find("'", j + 1)
+            end = len(s) if end == -1 else end
+            out.append(s[j + 1 : end])
+            j = end + 1
+        elif c == "$" and s[j + 1 : j + 2] == "'":
+            text, j = ansi_c(s, j + 2)
+            out.append(text)
+        elif c == '"':
+            j += 1
+            while j < len(s) and s[j] != '"':
+                if s[j] == BACKSLASH and j + 1 < len(s) and s[j + 1] in '\\"$`':
+                    j += 1
+                out.append(s[j])
+                j += 1
+            j += 1
+        elif c == BACKSLASH and j + 1 < len(s):
+            out.append(s[j + 1])
+            j += 2
+        else:
+            out.append(c)
+            j += 1
+    return "".join(out), j
+
+
+def backtick_body(s: str, i: int) -> tuple[str, int]:
+    j = i + 1
+    while j < len(s):
+        if s[j] == BACKSLASH:
+            j += 2
+            continue
+        if s[j] == "`":
+            return s[i + 1 : j], j + 1
+        j += 1
+    raise ValueError("unclosed backtick")
+
+
+def arithmetic_end(s: str, j: int, depth: int) -> int:
+    """The index after the `))` closing arithmetic opened before `j` with `depth` parens, or -1."""
+    while j < len(s):
+        if s[j] == "(":
+            depth += 1
+        elif s[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return -1
+
+
+class Prepared:
+    """`text` ready for shlex with each substitution replaced by a mark; `subs` the substitution bodies
+    (marked ones first, then those found in unquoted heredoc bodies); `data` the heredoc and here-string
+    bodies; `end` the index after a substitution body when reading one."""
+
+    def __init__(self, text: str, subs: list[str], data: list[str], end: int) -> None:
+        self.text, self.subs, self.data, self.end = text, subs, data, end
+
+
+def substitutions_in(body: str, level: int) -> list[str]:
+    """The `$(...)` and backtick bodies an unquoted heredoc body runs (quotes are text there)."""
+    found: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] == BACKSLASH:
+            i += 2
+            continue
+        if body.startswith("$((", i):
+            end = arithmetic_end(body, i + 3, 2)
+            if end != -1:
+                i = end
+                continue
+        if body.startswith("$(", i):
+            inner = prepare(body, i + 2, closing=True, level=level + 1)
+            found.append(body[i + 2 : inner.end - 1])
+            i = inner.end
+            continue
+        if body[i] == "`":
+            text, i = backtick_body(body, i)
+            found.append(text)
+            continue
+        i += 1
+    return found
+
+
+def prepare(command: str, start: int = 0, closing: bool = False, level: int = 0) -> Prepared:
+    """Read `command` from `start` in one pass (see the section comment). With `closing`, read the body
+    of a `$(...)` and stop at its `)`. ValueError on a substitution or `$'` that never closes."""
+    if level > MAX_READER_DEPTH:
+        raise TooDeep
+    out: list[str] = []
+    subs: list[str] = []
+    late_subs: list[str] = []  # from unquoted heredoc bodies: commands, but not in the text
+    data: list[str] = []
+    heredocs: list[tuple[str, bool]] = []  # (delimiter, body expands) opened on this line
     quote = ""
-    i, n = 0, len(command)
+    word_start = True
+    depth = 0
+    arithmetic_at = -1  # the depth `((` arithmetic opened at, while inside it
+    i, n = start, len(command)
     while i < n:
         ch = command[i]
         nxt = command[i + 1] if i + 1 < n else ""
@@ -281,13 +392,23 @@ def prepare(command: str) -> tuple[str, list[str]]:
             out.append(ch)
             i += 1
             continue
-        if ch == "`" or (ch == "$" and nxt == "(") or (not quote and ch in "<>" and nxt == "("):
-            body, end = read_substitution(command, i)
-            if body is not None:
-                nested.append(body)
-                out.append(" ")
+        if command.startswith("$((", i):
+            end = arithmetic_end(command, i + 3, 2)
+            if end != -1:
+                out.append("0")
+                word_start = False
                 i = end
                 continue
+        if ch == "`" or (ch == "$" and nxt == "(") or (not quote and ch in "<>" and nxt == "("):
+            if ch == "`":
+                body, i = backtick_body(command, i)
+            else:
+                inner = prepare(command, i + 2, closing=True, level=level + 1)
+                body, i = command[i + 2 : inner.end - 1], inner.end
+            out.append(f"{MARK}{len(subs)}{MARK}")
+            subs.append(body)
+            word_start = False
+            continue
         if quote == '"':
             if ch == BACKSLASH and nxt:
                 out.append(ch + nxt)
@@ -297,54 +418,85 @@ def prepare(command: str) -> tuple[str, list[str]]:
             out.append(ch)
             i += 1
             continue
+        # outside quotes from here on
+        if closing and depth == 0 and ch == ")":
+            return Prepared("".join(out), subs + late_subs, data, i + 1)
+        if ch == "$" and nxt == "'":
+            text, i = ansi_c(command, i + 2)
+            out.append(shlex.quote(text))
+            word_start = False
+            continue
         if ch in ("'", '"'):
             quote = ch
+            word_start = False
         elif ch == BACKSLASH and nxt:
             if nxt != NEWLINE:
                 out.append(ch + nxt)
+                word_start = False
             i += 2
             continue
-        elif ch == "#" and (i == 0 or command[i - 1] in WORD_START_AFTER):
+        elif ch == "#" and word_start:
             while i < n and command[i] != NEWLINE:  # a comment runs to the end of the line
                 i += 1
             continue
         elif command.startswith("<<<", i):
-            word, end = read_word(command, i + 3)
-            here_strings.append(word)
+            word, i = read_word(command, i + 3)
+            data.append(word)
             out.append(" ")
-            i = end
+            word_start = True
             continue
-        elif ch == "<" and nxt == "<":
-            m = HEREDOC_OPEN.match(command, i)
-            if m:
-                heredocs.append(m.group(2))
+        elif ch == "<" and nxt == "<" and arithmetic_at < 0:
+            j = i + 2 + (command[i + 2 : i + 3] == "-")
+            raw_start = j
+            delimiter, j = read_word(command, j)
+            if delimiter:
+                quoted = any(c in command[raw_start:j] for c in "'\"\\")
+                heredocs.append((delimiter, not quoted))
                 out.append(" ")
-                i = m.end()
+                word_start = True
+                i = j
                 continue
+        elif ch == "(" and nxt == "(" and word_start and arithmetic_at < 0:
+            arithmetic_at = depth
         elif ch == NEWLINE:
-            shell = runs_a_shell("".join(out[line_start:]))
-            if shell:
-                nested.extend(here_strings)
             out.append(" ; ")
+            word_start = True
             i += 1
-            for delimiter in heredocs:  # the bodies follow this line, one after another
+            for delimiter, expands in heredocs:  # the bodies follow this line, one after another
                 lines: list[str] = []
                 while i < n:
                     end = command.find(NEWLINE, i)
                     end = n if end == -1 else end
                     line, i = command[i:end], end + 1
-                    if line.strip() == delimiter:
+                    if line.rstrip("\r").strip() == delimiter:
                         break
                     lines.append(line)
-                if shell:
-                    nested.append(NEWLINE.join(lines))
-            here_strings, heredocs, line_start = [], [], len(out)
+                body = NEWLINE.join(lines)
+                data.append(body)
+                if expands:
+                    late_subs.extend(substitutions_in(body, level))
+            heredocs = []
             continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth <= arithmetic_at:
+                arithmetic_at = -1
         out.append(ch)
+        word_start = ch in OPERATOR_CHARS
         i += 1
-    if here_strings and runs_a_shell("".join(out[line_start:])):
-        nested.extend(here_strings)
-    return "".join(out), nested
+    if closing:
+        raise ValueError("unclosed $(")
+    return Prepared("".join(out), subs + late_subs, data, n)
+
+
+def unmark(text: str) -> str:
+    return MARKS.sub(" ", text)
+
+
+def marks_in(words: list[str]) -> set[int]:
+    return {int(k) for w in words for k in MARKS.findall(w)}
 
 
 def parse_commands(text: str, scope: tuple[int, ...], ids: list[int]) -> list[tuple[tuple[int, ...], list[str]]]:
@@ -366,6 +518,8 @@ def parse_commands(text: str, scope: tuple[int, ...], ids: list[int]) -> list[tu
             if ch == "(":
                 ids[0] += 1
                 stack.append(ids[0])
+                if len(stack) > MAX_SUBSHELLS:
+                    raise TooDeep
             elif ch == ")" and len(stack) > len(scope):
                 stack.pop()
     if words:
@@ -406,34 +560,57 @@ def shell_script(words: list[str]) -> str | None:
     return None
 
 
-def walk(command: str, scope: tuple[int, ...] = (), ids: list[int] | None = None, depth: int = 0) -> Iterator[tuple[tuple[int, ...], list[str]]]:
-    """(subshells, words) for each command `command` runs, reading nested scripts from the inside."""
+def walk(command: str, scope: tuple[int, ...] = (), ids: list[int] | None = None, depth: int = 0,
+         data: list[str] | None = None, emits_code: bool = False) -> Iterator[tuple[tuple[int, ...], list[str]]]:
+    """(subshells, words) for each command `command` runs. Heredoc and here-string bodies go to `data`.
+    With `emits_code`, what this text writes (its heredocs, here-strings, echo and printf arguments) is
+    run as code by whoever reads it, so it is read as commands too."""
     if depth > MAX_NESTING:
         raise TooDeep
     ids = ids if ids is not None else [0]
-    text, nested = prepare(command)
-    for where, raw in parse_commands(text, scope, ids):
+    data = data if data is not None else []
+    prepared = prepare(command)
+    if len(prepared.text) > MAX_TEXT:
+        raise TooLong
+    data.extend(prepared.data)
+    code: set[int] = set()
+    for where, raw in parse_commands(prepared.text, scope, ids):
         words = simple_command(raw)
         if not words:
             continue
         name = os.path.basename(words[0])
-        script = shell_script(words) if name in SHELLS else None
-        if script is not None:
-            ids[0] += 1
-            yield from walk(script, where + (ids[0],), ids, depth + 1)
-            continue
         if name == "eval":
-            yield from walk(" ".join(words[1:]), where, ids, depth + 1)
+            code |= marks_in(words[1:])
+            yield from walk(unmark(" ".join(words[1:])), where, ids, depth + 1, data)
             continue
+        if name in SHELLS:
+            script = shell_script(words)
+            if script is not None:
+                code |= marks_in([script])
+                ids[0] += 1
+                yield from walk(unmark(script), where + (ids[0],), ids, depth + 1, data)
+                continue
+            code |= marks_in(words[1:])  # bash <(curl ...): the substitution's output is the script
+        if name in ("source", "."):
+            code |= marks_in(words[1:])
+        if emits_code and name in ("echo", "printf"):
+            yield from walk(unmark(" ".join(w for w in words[1:] if not w.startswith("-"))), where, ids, depth + 1, data)
         yield where, words
-    for body in nested:
+    if emits_code:
+        for body in prepared.data:
+            ids[0] += 1
+            yield from walk(body, scope + (ids[0],), ids, depth + 1, data)
+    for k, body in enumerate(prepared.subs):
         ids[0] += 1
-        yield from walk(body, scope + (ids[0],), ids, depth + 1)
+        yield from walk(body, scope + (ids[0],), ids, depth + 1, data, emits_code=k in code)
 
 
 def bare_shell(words: list[str]) -> bool:
-    """A shell with no script: it runs whatever arrives on its standard input."""
-    if os.path.basename(words[0]) not in SHELLS or shell_script(words) is not None:
+    """A shell with no script, or `source /dev/stdin`: it runs whatever arrives on its standard input."""
+    name = os.path.basename(words[0])
+    if name in ("source", "."):
+        return len(words) > 1 and words[1] in STDIN_SCRIPTS
+    if name not in SHELLS or shell_script(words) is not None:
         return False
     skip = False
     for w in words[1:]:
@@ -441,7 +618,13 @@ def bare_shell(words: list[str]) -> bool:
             skip = False
         elif set(w) <= set("<>&0123456789"):
             skip = True  # a redirection and its target
-        elif w != "-" and not w.startswith("-"):
+        elif w in SHELL_OPTIONS_WITH_A_VALUE:
+            skip = True
+        elif re.fullmatch(r"-[a-zA-Z]*s[a-zA-Z]*", w):
+            return True  # -s: commands from standard input, the rest are its arguments
+        elif w == "-" or w.startswith(("-", "+")):
+            continue
+        else:
             return False  # a script file
     return True
 
@@ -474,9 +657,22 @@ def split_args(args: list[str], takes_value: str = "") -> tuple[set[str], set[st
     return longs, shorts, positional
 
 
+def option_values(args: list[str], short: str, long: str) -> list[str]:
+    """Every value given to `-x VALUE`, `-xVALUE`, `--long VALUE` or `--long=VALUE`."""
+    out: list[str] = []
+    for k, a in enumerate(args):
+        if a in (short, long) and k + 1 < len(args):
+            out.append(args[k + 1])
+        elif a.startswith(long + "="):
+            out.append(a.split("=", 1)[1])
+        elif a.startswith(short) and len(a) > len(short) and not a.startswith("--"):
+            out.append(a[len(short) :])
+    return out
+
+
 def has_long(longs: set[str], name: str) -> bool:
-    """Whether `name` was given: git takes any unambiguous prefix of a long option (`--har`)."""
-    return any(g == name or (len(g) >= 5 and name.startswith(g)) for g in longs)
+    """Whether `name` was given: git and GNU tools take any unambiguous prefix of a long option."""
+    return any(g == name or (len(g) >= 3 and name.startswith(g)) for g in longs)
 
 
 def switched_to(args: list[str], directory: str) -> str | None:
@@ -506,8 +702,11 @@ def native_path(path: str) -> str:
 
 def resolve_dir(base: str, path: str) -> str | None:
     """`path` as a directory relative to `base`, or None when it cannot be found."""
-    target = os.path.normpath(os.path.join(base, os.path.expanduser(native_path(path))))
-    return target if os.path.isdir(target) else None
+    try:
+        target = os.path.normpath(os.path.join(base, os.path.expanduser(native_path(path))))
+        return target if os.path.isdir(target) else None
+    except ValueError:  # a NUL in the path
+        return None
 
 
 def scoped(values: dict[tuple[int, ...], str | None], scope: tuple[int, ...]) -> str | None:
@@ -621,19 +820,13 @@ LEGACY_PATTERNS = [
     (re.compile(r"git\s+rebase\s+.*(\s-i\b|--interactive)"), "interactive rebase (do it manually if needed)"),
     (re.compile(r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(/|~|\$HOME|\.\.)(\s|$)"), "recursive delete of a root, home, or parent directory"),
 ]
+RISKY_MENTION = re.compile(r"\bgit\b.*\b(push|reset|clean|checkout|restore|branch|rebase|commit)\b|\brm\b.*\s-[a-zA-Z]*[rR]", re.S)
 
 
-def unreadable(command: str, project: str, protected: list[str], depth: int) -> str:
-    """Judge a command shlex cannot split. Bash still runs the lines before a broken quote, so each
-    line is judged on its own; a line that cannot be split either meets the old text patterns."""
-    if NEWLINE in command and depth < MAX_NESTING:
-        for line in command.split(NEWLINE):
-            reason = check_bash(line, project, protected, depth + 1)
-            if reason:
-                return reason
-        return ""
+def text_danger(text: str, protected: list[str]) -> str:
+    """The old text patterns, and deletes of protected branches: for code this cannot read."""
     for pattern, reason in LEGACY_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(text):
             return reason
     names = "|".join(re.escape(b) for b in protected)
     if names:
@@ -641,26 +834,55 @@ def unreadable(command: str, project: str, protected: list[str], depth: int) -> 
             rf"git\s+(?:branch|push)\b[^\n;&|]*\s(?:-[a-zA-Z]*[dD][a-zA-Z]*|--delete)\b[^\n;&|]*?\s(?:refs/heads/)?({names})(?![\w./-])",
             rf"git\s+push\b[^\n;&|]*\s:(?:refs/heads/)?({names})(?![\w./-])",
         ):
-            m = re.search(deleting, command)
+            m = re.search(deleting, text)
             if m:
                 return f"deleting {m.group(1)}"
+    return ""
+
+
+def unreadable(command: str, project: str, protected: list[str], depth: int) -> str:
+    """Judge a command that cannot be split. Bash still runs the lines before a broken quote, so each
+    line is judged on its own; a line that cannot be split either is held to the old text patterns, and
+    refused outright if it mentions a git or rm command that could do damage."""
+    if NEWLINE in command and depth < MAX_NESTING:
+        for line in command.split(NEWLINE):
+            reason = check_bash(line, project, protected, depth + 1)
+            if reason:
+                return reason
+        return ""
+    reason = text_danger(command, protected)
+    if reason:
+        return reason
+    if RISKY_MENTION.search(command):
+        return "could not read this command reliably; run it as simpler, separate commands"
     branch = head_branch(project) if LOOKS_LIKE_A_COMMIT.search(command) else ""
     return f"committing directly to {branch}. Create a feature branch first" if branch in protected else ""
 
 
 def check_bash(command: str, project: str, protected: list[str], depth: int = 0) -> str:
     """Why `command` is refused, or "". Commits are judged on the branch they will land on."""
+    data: list[str] = []
     try:
-        commands = list(walk(command, depth=depth))
+        commands = list(walk(command, depth=depth, data=data))
         if any(bare_shell(words) for _, words in commands):
-            # Text piped or fed to a bare shell is a script: read every multi-word argument as one.
-            fed = [w for _, ws in commands if not bare_shell(ws) for w in ws[1:] if any(c.isspace() for c in w)]
+            # A shell reading its standard input runs what is piped or fed to it: every other command's
+            # arguments, and every heredoc and here-string body.
+            fed = [" ".join(ws[1:]) for _, ws in commands if not bare_shell(ws) and len(ws) > 1] + data
             for text in fed:
-                commands.extend(walk(text, (-1,), depth=depth + 1))
+                commands.extend(walk(unmark(text), (-1,), depth=depth + 1))
+        return judge(commands, project, protected, depth)
     except TooDeep:
-        return "command nested too deeply to check; run it in plain steps"
+        return "command nested too deeply to check; run it as simpler, separate commands"
+    except TooLong:
+        return "command too long to check; split it into smaller commands"
+    except TooManyGitCalls:
+        return "too many git commands to check in one go; run them in smaller groups"
     except ValueError:
         return unreadable(command, project, protected, depth)
+
+
+def judge(commands: list[tuple[tuple[int, ...], list[str]]], project: str, protected: list[str], depth: int) -> str:
+    """Why the commands `walk` found are refused, or ""."""
     heres: dict[tuple[int, ...], str | None] = {(): project}
     pushed: dict[tuple[int, ...], list[str | None]] = {}
     moved: dict[str, str] = {}  # repository directory -> branch an earlier checkout put it on
@@ -668,6 +890,12 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
     for scope, words in commands:
         here = scoped(heres, scope)
         name = os.path.basename(words[0])
+        if MARK in words[0]:
+            # A command name computed at run time: judge the rest as git and as rm would be judged.
+            reason = (git_danger(words[1], words[2:], protected) if len(words) > 1 else "") or rm_danger(words[1:])
+            if reason:
+                return reason
+            continue
         if name in ("cd", "pushd"):
             if name == "pushd":
                 pushed.setdefault(scope, []).append(here)
@@ -682,6 +910,25 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
             if reason:
                 return reason
             continue
+        if name == "find":
+            for k, w in enumerate(words):
+                if w in ("-exec", "-execdir", "-ok", "-okdir"):
+                    run = []
+                    for x in words[k + 1 :]:
+                        if x in (";", "+"):
+                            break
+                        run.append(x)
+                    reason = check_bash(shlex.join(run), here or project, protected, depth + 1) if run else ""
+                    if reason:
+                        return reason
+            continue
+        if INTERPRETER.match(name):
+            for k, w in enumerate(words[1:-1], 1):
+                if w in INTERPRETER_CODE_FLAGS or re.fullmatch(r"-[a-zA-Z]*[ce]", w):
+                    reason = text_danger(words[k + 1], protected)
+                    if reason:
+                        return reason
+            continue
         if name not in ("git", "git.exe"):
             continue
         directory, rest = git_target(here, words[1:], project, aliases)
@@ -691,7 +938,7 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
             continue
         if rest[0] == "!" and len(rest) > 1:
             if depth >= MAX_NESTING:
-                return "command nested too deeply to check; run it in plain steps"
+                return "command nested too deeply to check; run it as simpler, separate commands"
             reason = check_bash(rest[1], where, protected, depth + 1)
             if reason:
                 return reason
@@ -700,6 +947,16 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
         reason = git_danger(sub, args, protected)
         if reason:
             return reason
+        nested = []
+        if sub == "submodule" and "foreach" in args:
+            run = [a for a in args[args.index("foreach") + 1 :] if a not in ("--recursive", "-q", "--quiet")]
+            nested = [run[0] if len(run) == 1 else shlex.join(run)] if run else []
+        elif sub == "rebase":
+            nested = option_values(args, "-x", "--exec")
+        for text in nested:
+            reason = check_bash(text, where, protected, depth + 1)
+            if reason:
+                return reason
         if sub == "config":
             _, _, positional = split_args(args)
             if len(positional) >= 2 and positional[0].startswith("alias."):

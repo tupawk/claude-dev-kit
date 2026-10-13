@@ -125,6 +125,99 @@ class WhatTheShellRunsIsRead(HookCase):
         )
 
 
+class TheSecondReviewsCases(HookCase):
+    """Found by the second adversarial review: each was blocked by the old text hook or is a plain bypass."""
+
+    def test_each_is_blocked(self) -> None:
+        project = self.project("feat/x")
+        for command in [
+            # a '#' glued to an escape or a substitution is not a comment
+            "echo a\\ #; git reset --hard",
+            "echo \\;# ; git reset --hard",
+            "echo $(true)#; git reset --hard",
+            # an unquoted heredoc runs its substitutions
+            "cat <<EOF\n$(git reset --hard)\nEOF",
+            "cat <<EOF\n`git reset --hard`\nEOF",
+            # a heredoc inside $(...), and output that becomes code
+            "x=\"$(cat <<'EOF'\ndon't\nEOF\ngit reset --hard\n)\"",
+            "eval \"$(cat <<'EOF'\ngit reset --hard\nEOF\n)\"",
+            "bash -c \"$(cat <<'EOF'\ngit reset --hard\nEOF\n)\"",
+            # text piped to a shell, without a quoted string
+            "echo git reset --hard | bash",
+            "echo git push -f origin x | sh",
+            "echo git reset --hard | bash -s foo",
+            "echo git reset --hard | bash -o errexit",
+            # ANSI-C strings and here-string words
+            "echo $'\\'' ; git push -uf origin x",
+            "echo $'\\'' ; rm -rf ~/",
+            "bash <<< $'git push -uf origin x'",
+            "cat <<< a'b c' ; git checkout .",
+            "bash <<<git\\ reset\\ --hard",
+            # heredoc edge cases
+            "cat <<EOF-X\nEOF-X\ngit reset --hard\nEOF",
+            "(( x = 1 << y ))\ngit reset --hard",
+            "cat <<EOF |\ngit reset --hard\nEOF\nbash",
+            ". /dev/stdin <<'EOF'\ngit reset --hard\nEOF",
+            "source /dev/stdin <<< 'git reset --hard'",
+            # commands that run commands
+            "find . -exec git reset --hard \\;",
+            'git submodule foreach "git reset --hard"',
+            "git rebase -x 'git reset --hard' main",
+            "winpty git push -f origin x",
+            "stdbuf -oL git push -f origin x",
+            "setsid git reset --hard",
+            "python -c \"import os; os.system('git push -f origin x')\"",
+            # short long-option prefixes git and rm accept
+            "git reset --ha",
+            "git clean --fo",
+            "git push --de origin main",
+            "rm --r ~",
+            # a command name computed at run time
+            "$(echo git) push -f origin x",
+        ]:
+            with self.subTest(command=command):
+                result = self.run_hook(command, cwd=project)
+                self.assertEqual(result.returncode, 2, f"allowed: {command!r}\n{result.stderr}")
+
+    def test_everyday_commands_with_awkward_prose_pass(self) -> None:
+        project = self.project("feat/x")
+        for command in [
+            "gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\nJulie's page: don't run `git push --force`.\n1) step one\nEOF\n)\"",
+            "git commit -m \"$(cat <<'EOF'\nfix: Julie's form (1) don't reset --hard\nEOF\n)\"",
+            'eval "$(ssh-agent -s)"',
+            "$(which python) script.py",
+            "python -c \"print('hello')\"",
+            "find . -name '*.pyc' -exec rm {} +",
+            "git submodule foreach git pull",
+            "git rebase -x 'npm test' main",
+            "echo foo#bar && git status",
+            "bash scripts/build.sh --release",
+        ]:
+            with self.subTest(command=command):
+                self.assert_allowed(self.run_hook(command, cwd=project))
+
+    def test_a_nul_byte_does_not_crash_the_hook(self) -> None:
+        project = self.project("feat/x")
+        result = self.run_hook("git a\x00b", cwd=project)
+        self.assertNotIn("could not parse", result.stderr)
+
+    def test_pathological_commands_finish_quickly(self) -> None:
+        import time
+
+        project = self.project("feat/x")
+        for shape, command in [
+            ("unclosed $(", "echo $(" * 2_000),
+            ("nested (", "(" * 50_000 + "ls" + ")" * 50_000),
+            ("many commits", "; ".join(["git commit -am x"] * 125)),
+            ("many unknown subcommands", "; ".join(f"git zz{k}" for k in range(300))),
+            ("one megabyte", "echo " + "a " * 500_000),
+        ]:
+            with self.subTest(shape=shape):
+                start = time.monotonic()
+                self.run_hook(command, cwd=project)
+                self.assertLess(time.monotonic() - start, 10.0)
+
+
 class MentionsAreNotCommands(HookCase):
     def test_each_harmless_command_passes(self) -> None:
         project = self.project("feat/x")

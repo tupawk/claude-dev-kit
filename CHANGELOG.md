@@ -34,6 +34,23 @@ the tools do, instead of matching raw text. Covered by `tests/test_guard_command
   cannot be split meets the old text patterns plus the deletes of protected branches, so it is never judged more
   leniently than before. Deliberately not blocked: `git pull` and `git merge` on a protected branch, which are how
   a local `main` is kept current. The unused `kit.py commit-branches` command is removed; `guard-bash` replaces it.
+- **A second adversarial review** found 13 more shapes, each now a test. A `#` glued to an escape or a
+  substitution (`echo $(true)#`) is not a comment. An unquoted heredoc's `$(...)` and backticks run and are
+  read. A substitution's body is found with the same reader, so a heredoc, an apostrophe or a `1)` inside
+  `"$(cat <<'EOF' ...)"` no longer ends it early (this also stops ordinary PR bodies being misread), and where
+  its output becomes code (`eval "$(...)"`, `bash -c "$(...)"`, `source <(...)`) what it emits is read as
+  commands; `eval "$(ssh-agent -s)"` still passes. Every argument piped to a bare shell is read, `bash -s` and
+  `-o` count as reading stdin, and so do `. /dev/stdin` and `source /dev/stdin`. ANSI-C `$'...'` strings and
+  quoted or escaped here-string words are decoded, heredoc delimiters may contain `-`, and `((...))` arithmetic
+  is not a heredoc. `find -exec`, `git submodule foreach`, `git rebase -x`, `stdbuf`, `winpty`, `setsid` and
+  `coproc` are read through; a `python -c`, `node -e`, `perl -e` or `ruby -e` one-liner is held to the old text
+  patterns. Long options as short as `--ha` and `rm --r` count, and a command name computed at run time
+  (`$(echo git) push -f`) is judged as git and as rm.
+- **Where it cannot be sure, the git hook refuses with a reason** instead of guessing: nesting past four levels
+  of `eval`/`sh -c` or 32 substitutions, more than 64 subshells, more than 100,000 characters once heredoc
+  bodies are dropped, more than 40 git look-ups (results are cached per call), and an unsplittable line that
+  mentions a git or rm command that could do damage. A NUL byte no longer crashes `kit.py`. A fuzz of 10,000
+  random and mutated commands and edits found no crash, and no command took over half a second.
 - **The secrets and design-token hooks read only `content` and `new_string`, and only for Edit and Write.**
   Both now read every string an edit writes (`edits[].new_string`, a notebook's `new_source`, any new field)
   except the text being replaced, so removing a leaked key is still possible, and both are wired to
