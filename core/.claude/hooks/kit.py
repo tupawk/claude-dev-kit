@@ -21,7 +21,9 @@ The three guards read the hook's JSON on stdin and print why the call is blocked
 it is allowed. They exit 3 when the input cannot be read, and the hook then blocks: a guard that
 cannot read its input must not wave the call through.
 
-    guard-bash                  destructive git and shell commands, commits on a protected branch
+    guard-bash                  destructive git and shell commands, commits on a protected branch,
+                                judged where the command runs: the payload's `cwd`, then `cd`,
+                                `git -C` and an earlier checkout
     guard-secrets               credentials in what an edit writes, writes to .env files
     guard-colours               hex colour literals written into frontend files
 
@@ -151,6 +153,11 @@ def design_exempt(cfg: dict, relpath: str) -> bool:
 SEPARATOR_CHARS = set(";&|(){}")
 OPERATOR_CHARS = set(" \t\r\n;&|()<>")
 GIT_OPTIONS_WITH_A_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+GIT_OPTIONS_THAT_MOVE_THE_REPOSITORY = {"--git-dir", "--work-tree"}
+GIT_REPOSITORY_VARIABLE = re.compile(r"(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR)(=|$)")
+# What walk yields in place of a command that aims git somewhere `cd` and `git -C` do not say.
+GIT_ELSEWHERE = "\x02git-elsewhere"
+CD_OPTIONS = {"-L", "-P", "-e", "-@"}  # how the path is resolved; the directory still changes
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 LOOKS_LIKE_A_COMMIT = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b(?!-)")
 MARK = "\x01"  # brackets the index of a substitution in prepared text: \x01<n>\x01
@@ -158,6 +165,14 @@ MARKS = re.compile("\x01(\\d+)\x01")
 NEWLINE = "\n"
 BACKSLASH = "\\"
 GIT_TIMEOUT_SECONDS = 10
+DETACHED_HEAD = 1  # `git symbolic-ref --quiet HEAD` exits 1 on a detached HEAD, 128 outside a repository
+# A commit the hook cannot place is refused: a guard that cannot tell where a commit lands must not
+# wave it through, and judging the project instead let one through whenever the project was elsewhere.
+UNKNOWN_TARGET = (
+    "could not work out which branch this commit lands on (for example a directory that cannot be "
+    "found, a variable, `cd -`, `--git-dir`, `GIT_DIR`, or no repository git could read there). Run it "
+    "from that repository with a literal path, or use `git -C <path> commit`"
+)
 GIT_BASH_DRIVE = re.compile(r"^/(?:cygdrive/)?([A-Za-z])(?:/|$)")
 MAX_NESTING = 4
 MAX_READER_DEPTH = 32  # substitutions inside substitutions
@@ -231,10 +246,21 @@ def run_git(directory: str, *args: str) -> subprocess.CompletedProcess[str] | No
     return out
 
 
-def head_branch(directory: str) -> str:
-    """The branch checked out in `directory`; "" if it is no repository or HEAD is detached."""
+def head_branch(directory: str | None) -> str | None:
+    """The branch checked out in `directory`: "" when HEAD is detached, None when it cannot be read.
+
+    None covers no directory, no repository, and git missing or too slow. `symbolic-ref` rather
+    than `rev-parse --abbrev-ref HEAD`, which fails on a branch with no commits yet and prints
+    "HEAD" for a detached one; `--quiet` makes a detached HEAD exit 1 and anything worse 128.
+    """
+    if directory is None:
+        return None
     out = run_git(directory, "symbolic-ref", "--quiet", "--short", "HEAD")
-    return out.stdout.strip() if out is not None and out.returncode == 0 else ""
+    if out is None:
+        return None
+    if out.returncode == 0:
+        return out.stdout.strip()
+    return "" if out.returncode == DETACHED_HEAD else None
 
 
 def is_branch(directory: str, name: str) -> bool:
@@ -560,11 +586,26 @@ def shell_script(words: list[str]) -> str | None:
     return None
 
 
+def points_git_elsewhere(raw: list[str], words: list[str]) -> bool:
+    """Whether this command aims git somewhere `cd` and `git -C` do not say.
+
+    GIT_DIR, GIT_WORK_TREE or GIT_COMMON_DIR assigned (in front of a command, alone, or through `env`)
+    or named (`export`, `declare`, `unset`), or `env -C` / `--chdir` running the command elsewhere.
+    """
+    if any(GIT_REPOSITORY_VARIABLE.match(w) for w in raw):
+        return True
+    prefix = raw[: len(raw) - len(words)]
+    return "env" in (os.path.basename(w) for w in prefix) and any(
+        w == "-C" or w.startswith("--chdir") for w in prefix
+    )
+
+
 def walk(command: str, scope: tuple[int, ...] = (), ids: list[int] | None = None, depth: int = 0,
          data: list[str] | None = None, emits_code: bool = False) -> Iterator[tuple[tuple[int, ...], list[str]]]:
     """(subshells, words) for each command `command` runs. Heredoc and here-string bodies go to `data`.
     With `emits_code`, what this text writes (its heredocs, here-strings, echo and printf arguments) is
-    run as code by whoever reads it, so it is read as commands too."""
+    run as code by whoever reads it, so it is read as commands too. A command that points git
+    elsewhere (`points_git_elsewhere`) is preceded by [GIT_ELSEWHERE], a bare assignment included."""
     if depth > MAX_NESTING:
         raise TooDeep
     ids = ids if ids is not None else [0]
@@ -576,6 +617,8 @@ def walk(command: str, scope: tuple[int, ...] = (), ids: list[int] | None = None
     code: set[int] = set()
     for where, raw in parse_commands(prepared.text, scope, ids):
         words = simple_command(raw)
+        if points_git_elsewhere(raw, words):
+            yield where, [GIT_ELSEWHERE]
         if not words:
             continue
         name = os.path.basename(words[0])
@@ -700,13 +743,44 @@ def native_path(path: str) -> str:
     return f"{drive.group(1)}:/{path[drive.end():]}" if drive else path
 
 
-def resolve_dir(base: str, path: str) -> str | None:
-    """`path` as a directory relative to `base`, or None when it cannot be found."""
+def resolve_dir(base: str | None, path: str) -> str | None:
+    """`path` as a directory relative to `base`, or None when it cannot be found.
+
+    `base` is None when the directory the command is in is itself unknown; then only a path that
+    names its own root (`/x`, `C:/x`, `~/x`) can be found.
+    """
     try:
-        target = os.path.normpath(os.path.join(base, os.path.expanduser(native_path(path))))
+        path = os.path.expanduser(native_path(path))
+        if base is None:
+            # Not os.path.isabs: from Python 3.13 it says False for "/x" on Windows, a path bash roots.
+            if not (os.path.splitdrive(path)[0] or path.startswith(("/", BACKSLASH))):
+                return None
+            base = os.getcwd()  # only lends a drive letter on Windows; a rooted path ignores the rest
+        target = os.path.normpath(os.path.join(base, path))
         return target if os.path.isdir(target) else None
     except ValueError:  # a NUL in the path
         return None
+
+
+def changed_dir(name: str, here: str | None, args: list[str]) -> str | None:
+    """Where `cd` or `pushd` with these arguments goes; None when this cannot say.
+
+    `cd` alone goes home. `cd -`, and `pushd` alone or with `+N`/`-N`, move along the shell's directory
+    stack, which a single command arrives without. Options other than the ones that only say how to
+    resolve the path are not followed either (`pushd -n` does not move at all).
+    """
+    names: list[str] = []
+    for i, a in enumerate(args):
+        if a == "--":
+            names += args[i + 1:]
+            break
+        if a == "-" or not a.startswith("-"):
+            names.append(a)
+        elif a not in CD_OPTIONS:
+            return None
+    if not names:
+        return None if name == "pushd" else resolve_dir(None, "~")
+    return None if names[0] == "-" else resolve_dir(here, names[0])
 
 
 def scoped(values: dict[tuple[int, ...], str | None], scope: tuple[int, ...]) -> str | None:
@@ -717,20 +791,22 @@ def scoped(values: dict[tuple[int, ...], str | None], scope: tuple[int, ...]) ->
     return None
 
 
-def git_target(here: str | None, args: list[str], project: str, aliases: dict[str, str]) -> tuple[str | None, list[str]]:
-    """The directory a git invocation works in and its words from the subcommand on. An alias set with
-    `-c alias.x=...` is added to `aliases`."""
-    directory, rest = here, args
+def git_target(here: str | None, args: list[str], aliases: dict[str, str]) -> tuple[str | None, list[str]]:
+    """The directory a git invocation works in (None when unknown) and its words from the subcommand on.
+    An alias set with `-c alias.x=...` is added to `aliases`."""
+    directory, rest, elsewhere = here, args, False
     while rest and rest[0].startswith("-"):
         option, rest = rest[0], rest[1:]
         if option == "-C" and rest:
-            directory = resolve_dir(directory or project, rest[0])
+            directory = resolve_dir(directory, rest[0])
         if option == "-c" and rest and rest[0].startswith("alias.") and "=" in rest[0]:
             name, value = rest[0][len("alias."):].split("=", 1)
             aliases[name] = value
+        # Another repository, named in a way this does not follow; a later -C does not undo it.
+        elsewhere = elsewhere or option.split("=", 1)[0] in GIT_OPTIONS_THAT_MOVE_THE_REPOSITORY
         if option in GIT_OPTIONS_WITH_A_VALUE and rest:
             rest = rest[1:]
-    return directory, rest
+    return (None if elsewhere else directory), rest
 
 
 def expand_alias(directory: str, rest: list[str], aliases: dict[str, str]) -> list[str]:
@@ -840,13 +916,22 @@ def text_danger(text: str, protected: list[str]) -> str:
     return ""
 
 
-def unreadable(command: str, project: str, protected: list[str], depth: int) -> str:
+def commit_verdict(branch: str | None, protected: list[str]) -> str:
+    """Why a commit landing on `branch` (None: unknown, "": detached HEAD) is refused, or ""."""
+    if not protected:
+        return ""
+    if branch is None:
+        return UNKNOWN_TARGET
+    return f"committing directly to {branch}. Create a feature branch first" if branch in protected else ""
+
+
+def unreadable(command: str, start: str | None, protected: list[str], depth: int) -> str:
     """Judge a command that cannot be split. Bash still runs the lines before a broken quote, so each
     line is judged on its own; a line that cannot be split either is held to the old text patterns, and
     refused outright if it mentions a git or rm command that could do damage."""
     if NEWLINE in command and depth < MAX_NESTING:
         for line in command.split(NEWLINE):
-            reason = check_bash(line, project, protected, depth + 1)
+            reason = check_bash(line, start, protected, depth + 1)
             if reason:
                 return reason
         return ""
@@ -855,12 +940,14 @@ def unreadable(command: str, project: str, protected: list[str], depth: int) -> 
         return reason
     if RISKY_MENTION.search(command):
         return "could not read this command reliably; run it as simpler, separate commands"
-    branch = head_branch(project) if LOOKS_LIKE_A_COMMIT.search(command) else ""
-    return f"committing directly to {branch}. Create a feature branch first" if branch in protected else ""
+    return commit_verdict(head_branch(start), protected) if LOOKS_LIKE_A_COMMIT.search(command) else ""
 
 
-def check_bash(command: str, project: str, protected: list[str], depth: int = 0) -> str:
-    """Why `command` is refused, or "". Commits are judged on the branch they will land on."""
+def check_bash(command: str, start: str | None, protected: list[str], depth: int = 0) -> str:
+    """Why `command` is refused, or "". `start` is the directory it runs in, None when unknown.
+
+    Commits are judged on the branch they will land on, in the repository they will land in.
+    """
     data: list[str] = []
     try:
         commands = list(walk(command, depth=depth, data=data))
@@ -870,7 +957,7 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
             fed = [" ".join(ws[1:]) for _, ws in commands if not bare_shell(ws) and len(ws) > 1] + data
             for text in fed:
                 commands.extend(walk(unmark(text), (-1,), depth=depth + 1))
-        return judge(commands, project, protected, depth)
+        return judge(commands, start, protected, depth)
     except TooDeep:
         return "command nested too deeply to check; run it as simpler, separate commands"
     except TooLong:
@@ -878,16 +965,20 @@ def check_bash(command: str, project: str, protected: list[str], depth: int = 0)
     except TooManyGitCalls:
         return "too many git commands to check in one go; run them in smaller groups"
     except ValueError:
-        return unreadable(command, project, protected, depth)
+        return unreadable(command, start, protected, depth)
 
 
-def judge(commands: list[tuple[tuple[int, ...], list[str]]], project: str, protected: list[str], depth: int) -> str:
+def judge(commands: list[tuple[tuple[int, ...], list[str]]], start: str | None, protected: list[str], depth: int) -> str:
     """Why the commands `walk` found are refused, or ""."""
-    heres: dict[tuple[int, ...], str | None] = {(): project}
+    heres: dict[tuple[int, ...], str | None] = {(): start}  # None: somewhere this cannot follow
     pushed: dict[tuple[int, ...], list[str | None]] = {}
     moved: dict[str, str] = {}  # repository directory -> branch an earlier checkout put it on
     aliases: dict[str, str] = {}  # set earlier in this same command
+    lost = False  # git was aimed or switched somewhere this cannot name: no later commit can be placed
     for scope, words in commands:
+        if words[0] == GIT_ELSEWHERE:
+            lost = True
+            continue
         here = scoped(heres, scope)
         name = os.path.basename(words[0])
         if MARK in words[0]:
@@ -899,7 +990,7 @@ def judge(commands: list[tuple[tuple[int, ...], list[str]]], project: str, prote
         if name in ("cd", "pushd"):
             if name == "pushd":
                 pushed.setdefault(scope, []).append(here)
-            heres[scope] = resolve_dir(here or project, words[1]) if len(words) > 1 else None
+            heres[scope] = changed_dir(name, here, words[1:])
             continue
         if name == "popd":
             stack = pushed.get(scope)
@@ -918,7 +1009,7 @@ def judge(commands: list[tuple[tuple[int, ...], list[str]]], project: str, prote
                         if x in (";", "+"):
                             break
                         run.append(x)
-                    reason = check_bash(shlex.join(run), here or project, protected, depth + 1) if run else ""
+                    reason = check_bash(shlex.join(run), here, protected, depth + 1) if run else ""
                     if reason:
                         return reason
             continue
@@ -931,9 +1022,8 @@ def judge(commands: list[tuple[tuple[int, ...], list[str]]], project: str, prote
             continue
         if name not in ("git", "git.exe"):
             continue
-        directory, rest = git_target(here, words[1:], project, aliases)
-        where = directory or project  # a target this cannot follow: judge the project, as before
-        rest = expand_alias(where, rest, aliases)
+        where, rest = git_target(here, words[1:], aliases)
+        rest = expand_alias(where or os.getcwd(), rest, aliases)  # unknown target: the project's and global aliases
         if not rest:
             continue
         if rest[0] == "!" and len(rest) > 1:
@@ -962,15 +1052,16 @@ def judge(commands: list[tuple[tuple[int, ...], list[str]]], project: str, prote
             if len(positional) >= 2 and positional[0].startswith("alias."):
                 aliases[positional[0][len("alias."):]] = positional[1]
         elif sub in ("checkout", "switch"):
-            switched = switched_to(args, where)
+            switched = switched_to(args, where) if where is not None else None
             if switched is None:
-                moved.pop(where, None)
+                lost = True
             elif switched:
                 moved[where] = switched
         elif sub == "commit":
-            branch = moved.get(where) or head_branch(where)
-            if branch in protected:
-                return f"committing directly to {branch}. Create a feature branch first"
+            branch = (moved.get(where) or head_branch(where)) if where is not None and not lost else None
+            reason = commit_verdict(branch, protected)
+            if reason:
+                return reason
     return ""
 
 
@@ -1112,12 +1203,36 @@ def check_colours(tool_input: dict, cfg: dict) -> str:
     return "\n".join([f"hardcoded colour in {relpath}.", *hits[:MAX_HITS_SHOWN], *more])
 
 
-def read_tool_input() -> dict:
-    """The hook's tool_input. Exits BAD_INPUT when it is not an object or a text field is not text."""
+def read_payload() -> dict:
+    """The hook's JSON from stdin. Exits BAD_INPUT when it is not an object."""
     try:
-        tool_input = json.load(sys.stdin).get("tool_input")
-    except (ValueError, AttributeError):
+        payload = json.load(sys.stdin)
+    except ValueError:
         sys.exit(BAD_INPUT)
+    if not isinstance(payload, dict):
+        sys.exit(BAD_INPUT)
+    return payload
+
+
+def bash_cwd(payload: dict) -> str | None:
+    """The directory the Bash tool runs the command in; None when it cannot be found.
+
+    lib.sh moves to CLAUDE_PROJECT_DIR before this runs, while Claude Code reports the Bash tool's
+    own working directory as `cwd`. They differ whenever a session works in a worktree, so
+    `os.getcwd()` named the primary checkout, often on main. A payload without `cwd` is judged in
+    the project, as it was before the field was read. Exits BAD_INPUT when `cwd` is not text.
+    """
+    cwd = payload.get("cwd")
+    if cwd is None:
+        return os.getcwd()
+    if not isinstance(cwd, str):
+        sys.exit(BAD_INPUT)
+    return resolve_dir(os.getcwd(), cwd) if cwd else None
+
+
+def read_tool_input(payload: dict) -> dict:
+    """The payload's tool_input. Exits BAD_INPUT when it is not an object or a text field is not text."""
+    tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         sys.exit(BAD_INPUT)
     for key in (*TEXT_FIELDS, "command"):
@@ -1157,15 +1272,16 @@ def main(argv: list[str]) -> int:
         value = data.get("tool_input", {}).get(args[0], "")
         print(value if isinstance(value, str) else json.dumps(value))
     elif cmd == "guard-bash":
-        reason = check_bash(read_tool_input().get("command") or "", os.getcwd(), protected)
+        payload = read_payload()
+        reason = check_bash(read_tool_input(payload).get("command") or "", bash_cwd(payload), protected)
         if reason:
             print(reason)
     elif cmd == "guard-secrets":
-        reason = check_secrets(read_tool_input())
+        reason = check_secrets(read_tool_input(read_payload()))
         if reason:
             print(reason)
     elif cmd == "guard-colours":
-        reason = check_colours(read_tool_input(), cfg)
+        reason = check_colours(read_tool_input(read_payload()), cfg)
         if reason:
             print(reason)
     else:

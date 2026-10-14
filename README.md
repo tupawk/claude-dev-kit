@@ -98,7 +98,7 @@ Created once by the script, then edited by hand. Read by the hooks on every call
 | `packages` | One entry per package: its profile and its directory (`.` for the root). The post-edit and stop hooks run each package's tools from there. |
 | `design.pack` | A directory (relative to the project) or a git URL (`https://`, `ssh://`, `git@`, `file://`) holding the project's brand. See *Design packs*. Empty means the kit's neutral palette. A git pack is cached per URL under `~/.cache/claude-dev-kit/packs/` and each update takes its default branch as it stands, history rewrites included. Its `design-system.md` becomes a rule Claude follows, so point only at a repo you control. |
 | `design.exempt` | Path globs the hex-colour hook skips: a vendored theme, a third-party stylesheet, a legacy file that is itself a token source. `**` spans directories; a bare directory name means everything under it. Say why in the PR when you add one. |
-| `protected_branches` | Branches the git hook refuses direct commits on. An empty list turns that check off; the kit recommends leaving it on. |
+| `protected_branches` | Branches the git hook refuses direct commits on. A commit is judged by the branch checked out where it runs (the Bash tool's directory, then any `cd` or `git -C`), so a worktree on a feature branch or a detached HEAD commits freely while the primary checkout sits on `main`. A commit whose target cannot be worked out is refused. An empty list turns that check off; the kit recommends leaving it on. |
 
 ## Design packs
 

@@ -70,6 +70,20 @@ the tools do, instead of matching raw text. Covered by `tests/test_guard_command
   for context, so a long single line is checked in linear time; a hook that times out lets the write through.
 - **Non-ASCII payloads.** `kit.py` reads and writes UTF-8 whatever the Windows code page is; an `echo` with an
   accent or an emoji used to fail the git hook closed.
+- **A commit in a git worktree was judged by the primary checkout's branch.** The hook moves to
+  `CLAUDE_PROJECT_DIR` before it reads the command, but the command runs in the Bash tool's own directory,
+  which Claude Code reports as the payload's `cwd`; the hook ignored it. A session working in a worktree whose
+  project was on `main` had every commit refused, even on a feature branch or a detached HEAD (2026-10-12).
+  `guard-bash` now starts from `cwd`, so a relative `cd` or `git -C` resolves from there too, and reads the
+  branch in that directory; a detached HEAD is not a protected branch. Covered by `tests/test_worktree_commits.py`.
+- **A commit the hook could not place was judged against the project**, which let it through whenever the
+  project was on a feature branch. It is now refused with "could not work out which branch this commit lands
+  on": a `cd` or `git -C` to a directory that does not exist or a variable, `cd -`, `pushd` with no directory,
+  `+N` or `-n`, `popd` with nothing pushed, `--git-dir` or `--work-tree` (in any order with `-C`), `GIT_DIR`,
+  `GIT_WORK_TREE` or `GIT_COMMON_DIR` however set (in front of git, through `env`, exported), `env -C`, a
+  checkout whose branch it cannot name (`git switch -`, or in a repository it cannot place), a `cwd` that is
+  gone or no repository, and git missing or not answering within 10 seconds. An empty `protected_branches`
+  still turns the check off.
 
 ### Changed
 - The three guard scripts are thin: each sources `lib.sh`, calls one `kit.py` subcommand and still blocks when
