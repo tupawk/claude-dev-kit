@@ -258,10 +258,16 @@ class CommitsInEveryShellShapeAreJudged(HookCase):
             "sh -c 'git commit -am x'",
             'bash -c "git commit -am x"',
             "eval git commit -am x",
-            "git switch -c feat/x && git switch - && git commit -am x",
         ]:
             with self.subTest(command=command):
                 self.assert_blocked(self.run_hook(command, cwd=project), "committing directly to main")
+
+    def test_switching_back_to_an_unnamed_branch_leaves_the_commit_unplaced(self) -> None:
+        project = self.project("main")
+        self.assert_blocked(
+            self.run_hook("git switch -c feat/x && git switch - && git commit -am x", cwd=project),
+            "could not work out which branch",
+        )
 
     def test_a_git_alias_for_commit_is_judged(self) -> None:
         project = self.project("main")

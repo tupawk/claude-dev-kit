@@ -90,12 +90,28 @@ class HookCase(unittest.TestCase):
         return root
 
     def run_hook(
-        self, command: str, *, cwd: Path, project_dir: Path | None = None
+        self,
+        command: str,
+        *,
+        cwd: Path,
+        project_dir: Path | None = None,
+        bash_cwd: Path | str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the hook from `cwd`. `bash_cwd` is the payload's `cwd`: where the Bash tool runs
+        the command, which Claude Code reports beside the command and which is not the project
+        when the session works in a worktree."""
+        payload: dict[str, object] = {"tool_input": {"command": command}}
+        if bash_cwd is not None:
+            payload["cwd"] = str(bash_cwd)
+        return self.run_payload(payload, cwd=cwd, project_dir=project_dir)
+
+    def run_payload(
+        self, payload: dict[str, object], *, cwd: Path, project_dir: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir or cwd)}
         return subprocess.run(
             [BASH, HOOK_RELATIVE],
-            input=json.dumps({"tool_input": {"command": command}}),
+            input=json.dumps(payload),
             cwd=cwd,
             env=env,
             capture_output=True,
@@ -197,12 +213,13 @@ class TheCommitIsJudgedInTheRepoItTargets(HookCase):
             with self.subTest(command=command):
                 self.assert_allowed(self.run_hook(command, cwd=project))
 
-    def test_a_target_that_does_not_exist_falls_back_to_the_project(self) -> None:
-        # Unknown target: keep today's answer rather than guess. On main that is a block.
-        project = self.project("main")
+    def test_a_target_that_does_not_exist_is_refused(self) -> None:
+        # Unknown target: fail closed. It used to be judged against the project, which waved
+        # the commit through whenever the project happened to be on a feature branch.
+        project = self.project("feat/x")
         self.assert_blocked(
             self.run_hook('cd /no/such/dir && git commit -am "x"', cwd=project),
-            "committing directly to main",
+            "could not work out which branch",
         )
 
 
