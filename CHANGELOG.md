@@ -5,6 +5,91 @@ Each release lists what changed since the one before. Work merged after the late
 
 ## [Unreleased]
 
+The guard hooks rebuilt from the 2026-10-11 review: they read commands and edits the way the shell and
+the tools do, instead of matching raw text. Covered by `tests/test_guard_commands.py` and
+`tests/test_guard_edits.py`.
+
+### Fixed
+- **The git safety hook read text, not commands.** Every decision now lives in `kit.py guard-bash`, which
+  splits a command into shell words (heredoc bodies dropped, quotes honoured, subshells tracked) and steps
+  over keywords, assignments and wrappers (`if`/`then`/`do`/`!`, `env`, `nice`, `sudo`, `xargs`), reading
+  `sh -c`, `bash -c` and `eval` from the inside. It now blocks spellings that used to pass: `git push -uf`,
+  `git push origin +branch`, `--force-with-lease`, `git push origin :main` and `-d main`, `git branch -D master`
+  (deletes honour `protected_branches`), `git -c x=y reset --hard`, `git reset -q --hard`, `git checkout .`,
+  `git restore .`, `git clean -d -f` and `--force`, `git rebase -ir`, `rm -rf ~/`, `rm -rf $HOME/`, `rm -rf ../`,
+  `rm -r -f ~`. A commit on a protected branch is found in a heredoc's opening line, a loop, an `if`, behind
+  `!`, `env` or `nice`, inside `sh -c` or `eval`, through a git alias, and after `git switch -`; a `cd` inside
+  `( ... )` no longer leaks out. Words that only mention a command pass: a branch named `feat/seat-inventory`,
+  `git checkout -- ./one/file`, deleting `main-backup`, a `grep` or `echo` of "git reset --hard", a heredoc body,
+  `git restore --staged .`, `git clean -n -f`, `git rebase -Xignore-space-change`, `git push -o ci.skip`, and a
+  `gh pr create` or `git commit -m` whose `$(cat <<'EOF' ...)` body mentions any of them.
+  The command is read in one linear pass that drops real comments only (a `#` starting a word; `${#x}`, `$#` and
+  `a#frag` are not comments), drops heredoc bodies only when no shell reads them, ignores `<<` inside quotes and
+  never takes `<<<` for a heredoc. The bodies of `$(...)`, backticks and `<(...)`, inside double quotes too, are
+  read as commands, as is text piped or fed (`|`, `<<<`, heredoc) to a bare `sh`/`bash`. Git's abbreviated long
+  options count (`--har`, `--del`, `--forc`), `--mirror` is a force push, and an alias set in the same command
+  (`-c alias.x=...`, `git config alias.x ...`) is read. `popd` returns to the directory `pushd` left. Nesting past
+  four levels (`eval eval eval ...`) is refused rather than read partly. A command that cannot be split (an
+  unbalanced quote) is judged line by line, since bash runs the lines before the broken one, and a line that still
+  cannot be split meets the old text patterns plus the deletes of protected branches, so it is never judged more
+  leniently than before. Deliberately not blocked: `git pull` and `git merge` on a protected branch, which are how
+  a local `main` is kept current. The unused `kit.py commit-branches` command is removed; `guard-bash` replaces it.
+- **A second adversarial review** found 13 more shapes, each now a test. A `#` glued to an escape or a
+  substitution (`echo $(true)#`) is not a comment. An unquoted heredoc's `$(...)` and backticks run and are
+  read. A substitution's body is found with the same reader, so a heredoc, an apostrophe or a `1)` inside
+  `"$(cat <<'EOF' ...)"` no longer ends it early (this also stops ordinary PR bodies being misread), and where
+  its output becomes code (`eval "$(...)"`, `bash -c "$(...)"`, `source <(...)`) what it emits is read as
+  commands; `eval "$(ssh-agent -s)"` still passes. Every argument piped to a bare shell is read, `bash -s` and
+  `-o` count as reading stdin, and so do `. /dev/stdin` and `source /dev/stdin`. ANSI-C `$'...'` strings and
+  quoted or escaped here-string words are decoded, heredoc delimiters may contain `-`, and `((...))` arithmetic
+  is not a heredoc. `find -exec`, `git submodule foreach`, `git rebase -x`, `stdbuf`, `winpty`, `setsid` and
+  `coproc` are read through; a `python -c`, `node -e`, `perl -e` or `ruby -e` one-liner is held to the old text
+  patterns. Long options as short as `--ha` and `rm --r` count, and a command name computed at run time
+  (`$(echo git) push -f`) is judged as git and as rm.
+- **Where it cannot be sure, the git hook refuses with a reason** instead of guessing: nesting past four levels
+  of `eval`/`sh -c` or 32 substitutions, more than 64 subshells, more than 100,000 characters once heredoc
+  bodies are dropped, more than 40 git look-ups (results are cached per call), and an unsplittable line that
+  mentions a git or rm command that could do damage. A NUL byte no longer crashes `kit.py`. A fuzz of 10,000
+  random and mutated commands and edits found no crash, and no command took over half a second.
+- **The secrets and design-token hooks read only `content` and `new_string`, and only for Edit and Write.**
+  Both now read every string an edit writes (`edits[].new_string`, a notebook's `new_source`, any new field)
+  except the text being replaced, so removing a leaked key is still possible, and both are wired to
+  `Edit|Write|MultiEdit|NotebookEdit` in `settings.json` and the plugin's `hooks.json`.
+- **The secrets hook** caught `.env.local` only when the path used forward slashes; any spelling is caught now,
+  as is `prod.env`, and names are compared the way Windows and macOS open them (`.ENV`, `.env ` with a trailing
+  space, `.env::$DATA`). New patterns: Stripe live keys, `github_pat_` tokens, Google API keys, encrypted and DSA
+  private keys, and a JSON `"api_key": "..."` assignment; credential names with a prefix count (`DB_PASSWORD`,
+  `dbPassword`, `AUTH0_CLIENT_SECRET`). Fewer false alarms: an `sk-` key must contain a digit
+  and not follow a letter (a CSS class `task-management-dashboard` passed as a key before), and an assignment's
+  value must have no spaces and not look like a placeholder.
+- **The design-token hook** blocked `// issue #123`, `Order #1001` and `href="#add"`. An anchor is never a
+  colour, and an all-digit three- or four-character `#123` counts only where a CSS value goes (`color: #333`,
+  `border: 1px solid #333` are still caught). Only the top-level `design/` is exempt now, not a `design/` folder
+  anywhere (`src/components/design/Button.css` was escaping the check), and a `design.exempt` entry with a dot
+  in a directory name (`theme.v1`) exempts what is under it. Only the 200 characters before each match are read
+  for context, so a long single line is checked in linear time; a hook that times out lets the write through.
+- **Non-ASCII payloads.** `kit.py` reads and writes UTF-8 whatever the Windows code page is; an `echo` with an
+  accent or an emoji used to fail the git hook closed.
+- **A commit in a git worktree was judged by the primary checkout's branch.** The hook moves to
+  `CLAUDE_PROJECT_DIR` before it reads the command, but the command runs in the Bash tool's own directory,
+  which Claude Code reports as the payload's `cwd`; the hook ignored it. A session working in a worktree whose
+  project was on `main` had every commit refused, even on a feature branch or a detached HEAD (2026-10-12).
+  `guard-bash` now starts from `cwd`, so a relative `cd` or `git -C` resolves from there too, and reads the
+  branch in that directory; a detached HEAD is not a protected branch. Covered by `tests/test_worktree_commits.py`.
+- **A commit the hook could not place was judged against the project**, which let it through whenever the
+  project was on a feature branch. It is now refused with "could not work out which branch this commit lands
+  on": a `cd` or `git -C` to a directory that does not exist or a variable, `cd -`, `pushd` with no directory,
+  `+N` or `-n`, `popd` with nothing pushed, `--git-dir` or `--work-tree` (in any order with `-C`), `GIT_DIR`,
+  `GIT_WORK_TREE` or `GIT_COMMON_DIR` however set (in front of git, through `env`, exported), `env -C`, a
+  checkout whose branch it cannot name (`git switch -`, or in a repository it cannot place), a `cwd` that is
+  gone or no repository, and git missing or not answering within 10 seconds. An empty `protected_branches`
+  still turns the check off.
+
+### Changed
+- The three guard scripts are thin: each sources `lib.sh`, calls one `kit.py` subcommand and still blocks when
+  Python, `kit.py` or the input is missing. One Python process per call instead of several; on the Windows
+  machine the kit is developed on, the git hook went from about 0.9 s to 0.45 s per Bash call.
+
 ## [0.3.1] - 2026-10-11
 
 Fixes from the 2026-10-11 review of `new-project.sh`, each reproduced on a throwaway project first and
