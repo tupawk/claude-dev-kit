@@ -17,6 +17,16 @@ Subcommands (all print to stdout, one value per line):
     rel <path>                  path relative to the project root, forward slashes
     tool-input <field>          that field of the hook's tool_input, read from stdin JSON
 
+For the Stop hook (see "the Stop hook's test runs" below):
+
+    stop-run <profile> <path> <scope> <deadline> <bash> <hook>
+                                run one package's profile stop hook: one run at a time, skipped when
+                                this tree was already proven green, killed with its children at the
+                                deadline (epoch seconds). Exits as the hook did, or 124 out of time
+    lf-files                    the files holding a failure in pytest's last-failed record, dropping
+                                entries whose file is gone; exits 1 when there is no record here
+    lf-passed <path>...         drop the record's entries under these paths after a green run
+
 The three guards read the hook's JSON on stdin and print why the call is blocked, or nothing when
 it is allowed. They exit 3 when the input cannot be read, and the hook then blocks: a guard that
 cannot read its input must not wave the call through.
@@ -33,13 +43,16 @@ hook that used to assume a single-package project keeps working.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 
 CONFIG = os.path.join(".claude", "kit.json")
@@ -1203,6 +1216,229 @@ def check_colours(tool_input: dict, cfg: dict) -> str:
     return "\n".join([f"hardcoded colour in {relpath}.", *hits[:MAX_HITS_SHOWN], *more])
 
 
+# --- the Stop hook's test runs -------------------------------------------------------------------
+#
+# stop-tests.sh hands each package's profile hook to stop-run, which does three things bash cannot do
+# well on all three platforms:
+#   - One run at a time per package and worktree. The lock is an OS file lock, freed when this process
+#     ends however it ends, so a killed hook never leaves it held.
+#   - A tree already proven green in this scope is not tested again. The proof is a hash of HEAD, the
+#     package's diff and untracked files, the scope, the profile hook, and the files outside git that
+#     decide what the default scope runs (SCOPE_STATE). Another session ending a turn on the same
+#     checkout, a reviewer that edits nothing, waits for the run in progress and uses its result.
+#   - A deadline. Claude Code abandons a hook at its timeout without stopping what it started, and on
+#     Windows a killed bash leaves its pytest running, so runs stacked up for an hour. At the deadline
+#     the hook and every process under it are killed and the run is reported as not proven.
+#
+# lf-files and lf-passed bound the python profile's last-failed scope. When none of the recorded
+# failures is collected (the failing test was renamed or deleted), `pytest --lf` runs the whole suite,
+# and an entry it never collects is never cleared, so one stale entry made every Stop a full run.
+
+LASTFAILED = os.path.join(".pytest_cache", "v", "cache", "lastfailed")
+SCOPE_STATE = {"python": [LASTFAILED]}
+OUT_OF_TIME = 124  # as timeout(1)
+LOCK_POLL_SECONDS = 0.2
+TERM_GRACE_SECONDS = 3
+HASH_CHUNK = 1 << 20
+# Through a native Windows Python, Git Bash hands /c/... paths on as C:/..., and the profile hooks
+# compare KIT_ROOT with `pwd -P`; the child bash re-reads it in its own spelling.
+RUN_PROFILE_HOOK = 'KIT_ROOT="$(cd "$KIT_ROOT" && pwd -P)"; export KIT_ROOT; cd "$1" && exec bash "$2"'
+
+
+def git_output(*args: str) -> bytes | None:
+    """`git args` in the current directory as bytes, never cached: the tree may change between calls."""
+    try:
+        out = subprocess.run(["git", *args], capture_output=True, check=False, timeout=GIT_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def file_digest(path: str) -> bytes | None:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(HASH_CHUNK), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.digest()
+
+
+def tree_fingerprint(profile: str, pkgpath: str, scope: str, hook: str) -> str | None:
+    """What a green run proves, as a hash; None when part of it cannot be read, so nothing is skipped."""
+    h = hashlib.sha256()
+
+    def part(label: str, data: bytes | None) -> bool:
+        if data is None:
+            return False
+        h.update(f"{label}\0{len(data)}\0".encode() + data)
+        return True
+
+    diff = ["diff", "--binary", "--no-ext-diff", "--no-textconv"]
+    head = git_output("rev-parse", "--verify", "--quiet", "HEAD") or b"unborn"
+    if head == b"unborn":
+        changes = [git_output(*diff, "--cached", "--", pkgpath), git_output(*diff, "--", pkgpath)]
+    else:
+        changes = [git_output(*diff, "HEAD", "--", pkgpath)]
+    untracked = git_output("ls-files", "--others", "--exclude-standard", "-z", "--", pkgpath)
+    readable = (
+        part("scope", scope.encode())
+        and part("hook", file_digest(hook))
+        and part("head", head)
+        and all(part("diff", c) for c in changes)
+        and part("untracked", untracked)
+    )
+    for name in (untracked or b"").split(b"\0"):
+        if name and readable:
+            readable = part(name.decode("utf-8", "replace"), file_digest(os.fsdecode(name)))
+    for state in SCOPE_STATE.get(profile, []):
+        if readable:
+            readable = part(state, file_digest(os.path.join(pkgpath, state)) or b"absent")
+    return h.hexdigest() if readable else None
+
+
+def stop_state(pkgpath: str) -> str | None:
+    """Where this package's lock and proof live: inside this worktree's git directory, never committed."""
+    gitdir = git_output("rev-parse", "--absolute-git-dir")
+    if gitdir is None:
+        return None
+    directory = os.path.join(gitdir.decode().strip(), "kit")
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        return None
+    return os.path.join(directory, "stop-" + hashlib.sha256(norm(pkgpath).encode()).hexdigest()[:16])
+
+
+def try_lock(f: io.BufferedRandom) -> bool:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def kill_tree(proc: subprocess.Popen[bytes]) -> None:
+    """Stop proc and everything under it: its process group, or on Windows its tree by parent id."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
+    else:
+        for sig, grace in ((signal.SIGTERM, TERM_GRACE_SECONDS), (signal.SIGKILL, None)):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                break
+            if grace:
+                try:
+                    proc.wait(grace)
+                except subprocess.TimeoutExpired:
+                    pass
+    proc.wait()
+
+
+def run_until(command: list[str], deadline: float) -> int | None:
+    """Run command; its exit code, or None when the deadline came first and it was killed."""
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=os.name != "nt")
+    try:
+        return proc.wait(timeout=max(0.0, deadline - time.time()))
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        return None
+
+
+def read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def stop_run(profile: str, pkgpath: str, scope: str, deadline: float, bash: str, hook: str) -> int:
+    command = [bash, "-c", RUN_PROFILE_HOOK, "kit-stop", pkgpath, hook]
+    state = stop_state(pkgpath)
+    if state is None:
+        rc = run_until(command, deadline)
+        return OUT_OF_TIME if rc is None else rc
+    with open(state + ".lock", "a+b") as lock:
+        while not try_lock(lock):
+            if time.time() >= deadline:
+                print(f"Another Stop hook was still testing {pkgpath}.", file=sys.stderr)
+                return OUT_OF_TIME
+            time.sleep(LOCK_POLL_SECONDS)
+        before = tree_fingerprint(profile, pkgpath, scope, hook)
+        if before is not None and read_text(state + ".proven") == before:
+            return 0
+        rc = run_until(command, deadline)
+        if rc is None:
+            return OUT_OF_TIME
+        # Recorded only if nothing changed while it ran: a mid-run edit was not what it tested.
+        if rc == 0 and before is not None and tree_fingerprint(profile, pkgpath, scope, hook) == before:
+            with open(state + ".proven", "w", encoding="utf-8") as f:
+                f.write(before + "\n")
+        return rc
+
+
+def failed_path(nodeid: str) -> str:
+    """The file or directory a pytest node id lives in: "tests/test_a.py::test_x[1]" -> "tests/test_a.py"."""
+    return nodeid.split("::", 1)[0] or "."
+
+
+def read_lastfailed() -> dict | None:
+    try:
+        with open(LASTFAILED, encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def write_lastfailed(record: dict) -> None:
+    """Rewrite the record as pytest writes it, through a temporary file so a reader never sees half."""
+    tmp = LASTFAILED + ".kit-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True))
+    os.replace(tmp, LASTFAILED)
+
+
+def lf_files() -> int:
+    record = read_lastfailed()
+    if record is None:
+        return 1
+    kept = {k: v for k, v in record.items() if os.path.exists(failed_path(k))}
+    if len(kept) != len(record):
+        write_lastfailed(kept)
+    for path in dict.fromkeys(failed_path(k) for k in kept):
+        print(path)
+    return 0
+
+
+def lf_passed(paths: list[str]) -> int:
+    """After a green run over `paths`, every recorded failure there that still exists ran and passed,
+    and pytest cleared it; what is left was never collected, so it is stale."""
+    record = read_lastfailed()
+    if record is None:
+        return 0
+
+    def ran(nodeid: str) -> bool:
+        where = failed_path(nodeid)
+        return any(p == "." or where == p or where.startswith(p.rstrip("/") + "/") for p in paths)
+
+    kept = {k: v for k, v in record.items() if not ran(k)}
+    if len(kept) != len(record):
+        write_lastfailed(kept)
+    return 0
+
+
 def read_payload() -> dict:
     """The hook's JSON from stdin. Exits BAD_INPUT when it is not an object."""
     try:
@@ -1284,6 +1520,13 @@ def main(argv: list[str]) -> int:
         reason = check_colours(read_tool_input(read_payload()), cfg)
         if reason:
             print(reason)
+    elif cmd == "stop-run":
+        profile, pkgpath, scope, deadline, bash, hook = args
+        return stop_run(profile, pkgpath, scope, float(deadline), bash, hook)
+    elif cmd == "lf-files":
+        return lf_files()
+    elif cmd == "lf-passed":
+        return lf_passed(args)
     else:
         print(f"kit.py: unknown command {cmd}", file=sys.stderr)
         return 2

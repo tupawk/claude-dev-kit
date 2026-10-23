@@ -47,6 +47,10 @@ By default the Stop hook uses **last-failed** scope: it reruns only what pytest 
 
 For one piece of work only, run `/tdd <item> full`: the skill writes `full` to `.claude/test-scope` (gitignored), which the Stop hook honours until the skill removes it at Exit. The `settings.json` value, when set, wins over the file.
 
+Last-failed scope reruns only the files that still hold a recorded failure. pytest's own `--lf` runs the whole suite when none of its recorded failures still exists (a failing test was renamed or deleted) and never forgets such an entry, so the hook drops entries whose file is gone and clears the stale ones after a green run.
+
+Every Stop run is bounded. A tree already proven green in the same scope is not tested again, so other sessions ending turns on the same checkout cost nothing, and a second Stop on the same package waits for the run in progress and uses its result. A run still going after `KIT_STOP_BUDGET` seconds (default 240; keep it under the hook's `timeout` of 300 in `settings.json`) is stopped with every process it started, and the hook reports the tests as not proven instead of letting the turn end quietly. A suite that cannot finish inside the budget does not belong in per-turn `full` scope: keep the default and run the full suite at `/tdd` Exit, in the background if it is long.
+
 CI always runs the full suite with coverage regardless of this setting.
 
 ## Layout
