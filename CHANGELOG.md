@@ -10,6 +10,20 @@ the tools do, instead of matching raw text. Covered by `tests/test_guard_command
 `tests/test_guard_edits.py`.
 
 ### Fixed
+- **The Stop hook ran the whole suite, and its runs piled up.** On 2026-10-23 a Windows checkout had thirteen
+  full pytest runs going at once, the oldest over an hour old. Three causes, each fixed and covered by
+  `tests/test_stop_tests.py`. (1) `pytest --lf` runs every test when none of its recorded failures is collected,
+  and never clears an entry it cannot collect, so one renamed failing test made every Stop a full run. The
+  python profile now passes pytest only the files that still hold a recorded failure (`kit.py lf-files`, which
+  drops entries whose file is gone) and clears the stale entries after a green run (`kit.py lf-passed`).
+  (2) Claude Code gives up on a hook at its timeout but does not stop what it started, and on Windows a killed
+  bash leaves pytest running. Each run now goes through `kit.py stop-run`, which stops the run and every
+  process under it (its process group; `taskkill /T` on Windows) once `KIT_STOP_BUDGET` seconds (default 240)
+  have passed, and the hook reports the tests as not proven instead of letting the turn end quietly.
+  (3) Every session on a checkout, reviewers that edit nothing included, ran its own suite at every turn end.
+  `stop-run` now allows one run per package and worktree at a time (an OS file lock in the git directory), and
+  skips a tree already proven green in the same scope (HEAD, the package's diff and untracked files, the scope,
+  the profile hook and pytest's failure record). Both profiles' STACK.md describe the budget.
 - **The git safety hook read text, not commands.** Every decision now lives in `kit.py guard-bash`, which
   splits a command into shell words (heredoc bodies dropped, quotes honoured, subshells tracked) and steps
   over keywords, assignments and wrappers (`if`/`then`/`do`/`!`, `env`, `nice`, `sudo`, `xargs`), reading

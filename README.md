@@ -125,7 +125,7 @@ Several projects for one organisation point at the same pack, so a palette chang
 | Engineering principles | rules loaded every session | core/.claude/rules |
 | Minimal code, no over-building | before-you-write ladder in the principles rule, `/simplify-review` delete list, code-reviewer step 5, `defer:` markers checked by `/definition-of-done` | core |
 | Ask when stuck, no workarounds | when-stuck rule; agents return `STATUS: BLOCKED` | core |
-| TDD | `/tdd` skill + PostToolUse hook that runs the tests related to each edit + Stop hook that refuses to finish with red tests (last-failed or changed scope by default, `KIT_TEST_SCOPE=full` for the whole suite; see the profile's STACK.md) | core dispatchers + profile hooks |
+| TDD | `/tdd` skill + PostToolUse hook that runs the tests related to each edit + Stop hook that refuses to finish with red tests (last-failed or changed scope by default, `KIT_TEST_SCOPE=full` for the whole suite; one run at a time per package, a tree already proven green is not retested, `KIT_STOP_BUDGET` stops a run that would outlive the hook; see the profile's STACK.md) | core dispatchers + profile hooks |
 | Consistent, accessible UI | tokens.css + design pack + path-scoped frontend rule + PreToolUse hook that blocks hex colours outside tokens.css (with `design.exempt`) + image aspect checker | core |
 | Git safety | PreToolUse hook (`protected_branches`) + permission deny rules | core |
 | Maintainable docs | documentation rule, `/update-docs`, `docs-writer`, PR template | core |
